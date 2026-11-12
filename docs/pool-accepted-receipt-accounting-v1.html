@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Pool Accepted-Receipt Accounting v1</title></head>
+<body>
+<h1>Pool Accepted-Receipt Accounting v1</h1>
+<p>Status: additive local accounting materialization for the durable submission
+journal. This extension supersedes the journal document's economic exclusion
+for the combined source head only. Its policy identifier is
+<code>PPLNS-DISCOVERY-CUT/v1</code>.</p>
+<h2>Discovery boundary</h2>
+<p>When a valid block candidate is discovered, Pool takes one locked PPLNS
+snapshot. A normal valid share is inserted before that snapshot; an otherwise
+valid low-difficulty block remains excluded under the existing policy. Pool
+freezes the candidate, fee inputs, total work, and sorted per-miner credit
+lines into a canonical digest.</p>
+<h2>Durability boundary</h2>
+<p>The complete immutable intent commits in the same PostgreSQL transaction as
+the candidate and initial submission state, before any HTTP request. Equal
+replay must match the intent digest. Missing or variant intent data latches a
+conflict and fails closed.</p>
+<h2>Accepted-receipt consumer</h2>
+<p>Only a matching immutable accepted receipt and intent may create accounting
+rows. One transaction locks them, records one effect marker keyed by candidate
+ID, inserts one legacy block keyed by the persisted share PoW hash, inserts the
+persisted sorted credit lines, and commits all-or-none. Repetition,
+concurrency, restart, and commit-acknowledgement loss converge by reading the
+effect marker. Unexpected pre-existing legacy rows are conflicts; they are
+never adopted.</p>
+<h2>Startup and runtime</h2>
+<p>The versioned SQL migration must be installed by the operator. Pool verifies
+schema bindings, drains and verifies accepted-but-unapplied receipts before
+opening Stratum, and continues bounded reconciliation while running. A
+prepared orphan accepted during the readiness scan is drained before the
+listener opens.</p>
+<h2>Claim ceiling</h2>
+<p>This proves durable discovery-time intent and exactly-once local creation of
+the corresponding legacy block and per-miner credit rows. It does not prove or
+perform canonical maturity, wallet transactions, payouts, historical
+backfill, live deployment, or release-tuple qualification.</p>
+</body>
+</html>

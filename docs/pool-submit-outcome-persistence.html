@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pool Submit Outcome Persistence</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1317;
+      --panel: #171d23;
+      --panel2: #111820;
+      --text: #ecf1f5;
+      --muted: #aab6c2;
+      --line: #2a3540;
+      --accent: #7dd3c7;
+      --bad: #ff8e7c;
+    }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 34px 20px 52px;
+      line-height: 1.5;
+    }
+    h1 { margin: 0 0 8px; font-size: clamp(2rem, 4vw, 3.1rem); line-height: 1.08; }
+    h2 { margin: 28px 0 10px; font-size: 1.35rem; }
+    p, li { color: var(--muted); }
+    code {
+      color: var(--accent);
+      background: #0b1116;
+      border: 1px solid #24313a;
+      border-radius: 5px;
+      padding: 1px 5px;
+    }
+    .summary, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .summary strong { color: var(--text); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--text); background: #17222b; }
+    tr:last-child td { border-bottom: 0; }
+    .risk {
+      border-left: 4px solid var(--bad);
+    }
+  </style>
+  <script type="application/json" id="agent-metadata">
+    {
+      "branch": "feature/pool-submit-outcome-persistence",
+      "base_branch": "feature/pool-submit-v2-capability-gate",
+      "risk": "low-to-medium",
+      "behavior_change": "observability/storage only",
+      "live_deploy_gate": "requires DB migration or fresh schema before enabling release",
+      "test_focus": [
+        "query builder is deterministic",
+        "handler records accepted and rejected block candidates",
+        "legacy successful submits still record outcome=ok",
+        "storage failure does not reject an ASIC share after node submit"
+      ]
+    }
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Pool Submit Outcome Persistence</h1>
+    <p class="summary">
+      Structured submit outcomes are useful only if they survive beyond logs. This branch records every solved-block
+      submit attempt in PostgreSQL so dashboards, A/B comparisons, and incident reviews can use database truth instead
+      of string-matching process logs.
+    </p>
+
+    <div class="grid">
+      <section>
+        <h2>Problem</h2>
+        <p>
+          Today the pool increments Prometheus counters and writes logs when a candidate block is accepted, stale,
+          duplicate, or rejected. That is good for live charts, but it does not create a durable per-candidate history
+          keyed by backend and template sequence.
+        </p>
+      </section>
+      <section>
+        <h2>Approach</h2>
+        <p>
+          Add an append-only <code>block_submissions</code> table and a storage helper. The submit path records a row
+          after the node response is known. The row is independent of payout accounting, so rejected candidates cannot
+          affect credits. A backend-labeled Prometheus counter is also emitted for live dashboards.
+        </p>
+      </section>
+      <section>
+        <h2>Review Boundary</h2>
+        <p>
+          This branch does not change whether miners are acknowledged, whether blocks are credited, or whether the
+          configured node health state changes. It only persists facts already available in the submit path.
+        </p>
+      </section>
+    </div>
+
+    <h2>Data Captured</h2>
+    <table>
+      <thead><tr><th>Column</th><th>Why It Matters</th></tr></thead>
+      <tbody>
+        <tr><td><code>candidate_hash</code></td><td>Local solved candidate identifier, useful even when the node rejects the candidate.</td></tr>
+        <tr><td><code>node_block_hash</code></td><td>Node-returned accepted block hash when structured submit v2 provides one.</td></tr>
+        <tr><td><code>backend</code></td><td>Shows which node accepted or rejected the candidate.</td></tr>
+        <tr><td><code>template_seq</code></td><td>Correlates submits with template freshness and WebSocket sequence data.</td></tr>
+        <tr><td><code>accepted</code>, <code>outcome</code>, <code>message</code></td><td>Durable source for accepted/rejected rates and incident reports.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Metric Added</h2>
+    <section>
+      <p>
+        <code>pool_block_submit_backend_outcomes_total{node,outcome,reason}</code> gives Grafana a low-cardinality
+        live view of which backend produced each accepted or rejected candidate. Template sequence remains in the
+        database table, not as a Prometheus label, to avoid high-cardinality time series.
+      </p>
+    </section>
+
+    <h2>Deployment Gate</h2>
+    <section class="risk">
+      <p>
+        Existing live databases need the migration before deploying a binary that calls
+        <strong>Historical/superseded:</strong> this legacy <code>RecordBlockSubmission</code>
+        path is not submission authority for <code>POOL-DURABLE-SUBMISSION-JOURNAL/v1</code>.
+        Fresh installs retain the table through <code>schema.sql</code> for historical
+        compatibility only; see <a href="pool-durable-submission-journal-v1.html">the v1 journal</a>.
+        If insert fails at runtime, the pool logs the persistence failure but does not turn a node-accepted block into
+        an ASIC reject.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

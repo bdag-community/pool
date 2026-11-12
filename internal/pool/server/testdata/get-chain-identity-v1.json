@@ -1,0 +1,8 @@
+{
+  "schema": "bdag.chain-identity.v1",
+  "network": "mainnet",
+  "native_network_magic": "0xb4c3dce8",
+  "native_genesis_hash": "0xd62590d28f5c32b6d46839075b3173c3d4c178482f8cd1b0e424bd3feeaed11c",
+  "evm_chain_id": "1404",
+  "evm_genesis_hash": "0x3fb19ea409ac7399ad7b988b88e0d436722c967137e51e834ccefd7611a592ef"
+}

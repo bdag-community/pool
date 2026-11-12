@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allow Unique Block Candidates Per Job</title>
+  <style>
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f8fb; color: #172033; line-height: 1.5; }
+    main { max-width: 980px; margin: 0 auto; padding: 32px 20px 48px; }
+    h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.1; }
+    h2 { margin-top: 28px; font-size: 20px; }
+    .lead { color: #4b5870; font-size: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 22px 0; }
+    .card { background: #fff; border: 1px solid #dde3ec; border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(12,20,33,.04); }
+    .card strong { display: block; margin-bottom: 6px; }
+    .good { border-left: 5px solid #1f9d55; }
+    .risk { border-left: 5px solid #d97706; }
+    code { background: #eef2f6; border: 1px solid #dce3ec; border-radius: 5px; padding: 1px 5px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; background: #fff; border: 1px solid #dde3ec; border-radius: 8px; overflow: hidden; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e7ebf1; vertical-align: top; }
+    th { background: #edf2f7; color: #334155; font-size: 13px; }
+  </style>
+  <script type="application/json" id="agent-metadata">
+  {
+    "artifact_type": "source_change_explainer",
+    "repo": "blockdag-source/pool",
+    "branch": "feature/pool-allow-multiple-blocks-per-job",
+    "commit": "see current git log for feature/pool-allow-multiple-blocks-per-job",
+    "created_at_sast": "2026-05-15",
+    "primary_goal": "Improve miner-normalized block production by not suppressing distinct valid DAG blocks from the same Stratum job."
+  }
+  </script>
+</head>
+<body>
+<main>
+  <h1>Allow Unique Block Candidates Per Job</h1>
+  <p class="lead">The pool previously treated a Stratum job as single-submit after the first block candidate. That is safe for preventing repeats, but it may be too restrictive for BlockDAG because distinct valid sibling blocks can share the same parent/template.</p>
+
+  <div class="grid">
+    <section class="card risk">
+      <strong>Old behavior</strong>
+      Once <code>jobData.blockSubmitted</code> became true, every later block candidate for that job was rejected locally as <code>duplicate_block</code>, even if the block hash was different.
+    </section>
+    <section class="card good">
+      <strong>New behavior</strong>
+      When <code>POOL_ALLOW_MULTIPLE_BLOCK_CANDIDATES_PER_JOB=true</code>, the pool accepts unique block hashes for the same job. Duplicate protection stays at the actual block-hash level, where it belongs.
+    </section>
+    <section class="card">
+      <strong>Why it matters</strong>
+      With multiple ASICs on one pool, several miners can work the same template concurrently. Suppressing all later candidates may lower accepted blocks per miner-hour.
+    </section>
+  </div>
+
+  <h2>Safety Boundaries</h2>
+  <table>
+    <thead><tr><th>Protection</th><th>Status after change</th></tr></thead>
+    <tbody>
+      <tr><td>Exact share replay</td><td>Still blocked by per-job nonce/extranonce/ntime replay tracking.</td></tr>
+      <tr><td>Exact block duplicate</td><td>Still blocked by global block-hash dedupe.</td></tr>
+      <tr><td>Health visibility</td><td><code>jobData.blockSubmitted</code> still records that at least one block was submitted for a job.</td></tr>
+      <tr><td>Potential extra node load</td><td>Only unique block hashes pass through, so extra load should correspond to potentially useful DAG blocks.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Feature Flag</h2>
+  <table>
+    <thead><tr><th>Setting</th><th>Behavior</th></tr></thead>
+    <tbody>
+      <tr><td><code>POOL_ALLOW_MULTIPLE_BLOCK_CANDIDATES_PER_JOB=true</code></td><td>Default. Allows multiple unique block hashes from one job, while exact block hashes are still suppressed globally.</td></tr>
+      <tr><td><code>POOL_ALLOW_MULTIPLE_BLOCK_CANDIDATES_PER_JOB=false</code></td><td>Restores legacy per-job single-submit suppression for controlled compatibility tests.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Validation</h2>
+  <table>
+    <thead><tr><th>Test</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>TestMarkBlockCandidateForSubmitRejectsSecondJobCandidateByDefault</code></td><td>Passed: default behavior keeps legacy per-job suppression.</td></tr>
+      <tr><td><code>TestMarkBlockCandidateForSubmitAllowsUniqueBlocksForSameJobWhenEnabled</code></td><td>Passed: block-a and block-b accepted for one job when flagged on, duplicate block-b rejected globally.</td></tr>
+      <tr><td><code>go test ./cmd/pool ./internal/pool/server -count=1</code></td><td>Passed.</td></tr>
+      <tr><td><code>go test ./... -count=1</code></td><td>Passed.</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

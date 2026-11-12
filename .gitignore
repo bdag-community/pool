@@ -1,0 +1,12 @@
+*.sh
+Dockerfile
+bin/
+.vscode/
+*__debug_*
+scripts/
+.env
+
+# Runtime credentials are provisioned outside release source.
+.env
+.env.*
+!.env.example

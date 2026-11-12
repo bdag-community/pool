@@ -1,0 +1,6 @@
+bin/
+pool
+__debug_bin*
+.env
+.git/
+.vscode/

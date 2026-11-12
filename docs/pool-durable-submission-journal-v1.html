@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Pool Durable Submission Journal v1</title></head>
+<body>
+<h1>Pool Durable Submission Journal v1</h1>
+<p>Status: the Pool-only non-economic durable submission boundary for
+<code>POOL-DURABLE-SUBMISSION-JOURNAL/v1</code>. This document is limited to
+the tested source envelope and makes no Core, accounting, or release claim.</p>
+<h2>Boundary</h2>
+<p>A frozen 185-byte header and exact four-byte <code>extraNonce2</code> are
+committed with a prepared RPC attempt before HTTP. HTTP is outside the
+PostgreSQL transaction; reconciliation reuses only the committed request
+bytes.</p>
+<h2>Acceptance</h2>
+<p>Only a strict structured <code>accepted</code> or
+<code>already_accepted</code> outcome with the matching Core block hash may
+create one immutable accepted-submission receipt. Ambiguous outcomes remain
+pending; identity and terminal contradictions append evidence and latch a
+global conflict.</p>
+<h2>Economic boundary</h2>
+<p>The journal does not write <code>block_submissions</code>,
+<code>blocks</code>, <code>credits</code>, <code>payouts</code>, maturity, or
+payout state. Accepted receipts are inputs for a separately authorized
+accounting packet.</p>
+<h2>Operations</h2>
+<p>PostgreSQL is required. The binary verifies, but does not run, the
+versioned migration. There is one reconciler worker, bounded response
+evidence, and no unsafe journal-disabled mode.</p>
+</body>
+</html>

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pool ASIC MAC Lane Identity</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f7f8fb; --panel:#fff; --ink:#1d2433; --muted:#647084; --line:#d8deea; --accent:#1769aa; --warn:#a56300; }
+    body { margin:0; font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+    main { max-width:1080px; margin:0 auto; padding:32px 20px 48px; }
+    h1 { margin:0 0 8px; font-size:28px; letter-spacing:0; }
+    h2 { margin:28px 0 12px; font-size:18px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+    p { margin:0 0 12px; }
+    code { background:rgba(23,105,170,.08); border:1px solid rgba(23,105,170,.18); border-radius:4px; padding:1px 5px; }
+    table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); }
+    th,td { border-bottom:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; }
+    th { background:rgba(23,105,170,.08); }
+    tr:last-child td { border-bottom:0; }
+    .tag { display:inline-block; border-radius:999px; padding:2px 8px; margin-right:6px; font-size:12px; font-weight:650; background:rgba(23,105,170,.1); color:var(--accent); }
+    .note { border-left:4px solid var(--warn); background:rgba(165,99,0,.08); padding:10px 12px; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Pool ASIC MAC Lane Identity</h1>
+    <p><span class="tag">Repo: pool</span><span class="tag">Branch: jeremy-dev</span><span class="tag">Invariant: MAC-only local ASIC lanes</span></p>
+    <p>The Stratum pool must distinguish physical ASIC work lanes by hardware identity instead of collapsing multiple ASICs behind one wallet, worker, session, or transient IP observation.</p>
+  </header>
+
+  <h2>Why This Exists</h2>
+  <p>Several local ASICs mine to the same payout wallet. Wallets are payout identities, not physical miner identities. When operational views or recovery windows group shared-wallet clients as one lane, the pool and dashboard can undercount the local pool, hide failed ASICs, or attribute work to one device that actually came from several devices.</p>
+
+  <h2>Identity Order</h2>
+  <table>
+    <thead><tr><th>Identity</th><th>Use</th><th>Rule</th></tr></thead>
+    <tbody>
+      <tr><td><code>mac:&lt;normalized-mac&gt;</code></td><td>Physical LAN ASIC lane identity</td><td>Required for configured/local ASIC LAN routes. Resolved from stack overrides or the host neighbor table.</td></tr>
+      <tr><td><code>unknown</code></td><td>Unresolved local ASIC route</td><td>Used for configured/local ASIC LAN routes when the MAC is unavailable. These routes stay unattributed until the MAC is collected.</td></tr>
+      <tr><td><code>ip:&lt;remote-host&gt;</code></td><td>Remote Stratum lane</td><td>Used only for remote Stratum clients outside <code>BDAG_ASIC_LAN_CIDRS</code>; never for physical LAN ASICs.</td></tr>
+      <tr><td>Stratum session/extranonce</td><td>Protocol connection identity</td><td>Used only for non-MAC fallback recovery uniqueness.</td></tr>
+      <tr><td>Wallet username</td><td>Payout attribution</td><td>Never a durable ASIC lane; multiple ASICs may intentionally share one wallet.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Implementation</h2>
+  <p>On each accepted Stratum connection, the pool stores <code>addr</code>, <code>remote_host</code>, <code>asic_mac</code>, and <code>lane_id</code> on the client. MAC resolution checks <code>POOL_ASIC_MAC_OVERRIDES</code> first, then the Linux ARP table from <code>/proc/net/arp</code> or <code>POOL_ASIC_ARP_TABLE_PATH</code>. The pool also reads <code>BDAG_ASIC_LAN_CIDRS</code> so it can reject IP-lane fallback for physical LAN ASIC routes. The <code>/health/job-state</code> endpoint exposes these fields per client, and expired-job global recovery uses the MAC lane before session, extranonce, remote-IP, username, or raw address.</p>
+
+  <h2>Deployment Notes</h2>
+  <p class="note">Containers may not see LAN neighbor entries depending on Docker network mode. Stack deployments must provide <code>BDAG_ASIC_LAN_CIDRS</code> and should provide <code>POOL_ASIC_MAC_OVERRIDES</code> from the miner registry when host ARP visibility is not guaranteed. This keeps the pool code MAC-only for LAN ASICs without depending on Codex or a human to infer lanes from dashboard logs.</p>
+
+  <h2>Regression Guard</h2>
+  <p>Do not remove or weaken the tests covering <code>resolveASICMACForRemote</code>, <code>clientLaneIdentity</code>, <code>snapshotClientJobHealth</code>, and <code>expiredJobClientKey</code>. Those tests are the durable guard against returning to wallet-first or IP-only ASIC lane behavior.</p>
+</main>
+<script type="application/json" id="agent-metadata">
+{
+  "document_type": "architecture_note",
+  "repo": "BlockdagEngineering/pool",
+  "branch": "jeremy-dev",
+  "created": "2026-06-07",
+  "invariant": "Physical LAN ASIC work lanes are MAC-only. Remote Stratum outside BDAG_ASIC_LAN_CIDRS may use IP identity. Wallet username remains payout identity only.",
+  "code_paths": [
+    "internal/pool/server/asic_identity.go",
+    "internal/pool/server/server.go",
+    "internal/pool/server/health.go",
+    "internal/pool/server/expired_job_recovery.go"
+  ],
+  "test_paths": [
+    "internal/pool/server/asic_identity_test.go",
+    "internal/pool/server/health_test.go",
+    "internal/pool/server/expired_job_recovery_test.go"
+  ]
+}
+</script>
+</body>
+</html>

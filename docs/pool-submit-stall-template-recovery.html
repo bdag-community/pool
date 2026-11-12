@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pool Submit Stall Template Recovery</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101318;
+      --panel: #171c23;
+      --panel-2: #202632;
+      --text: #eef3f8;
+      --muted: #aeb8c5;
+      --line: #344052;
+      --accent: #62d0a4;
+      --warn: #f2c14e;
+      --bad: #ff6b6b;
+      --code: #d7f5ff;
+    }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+    h1, h2, h3 {
+      line-height: 1.18;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+    }
+    h2 {
+      margin-top: 28px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 8px;
+    }
+    code {
+      color: var(--code);
+      background: #0b0e13;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1px 5px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      vertical-align: top;
+    }
+    th {
+      background: var(--panel-2);
+      text-align: left;
+    }
+    .lede {
+      color: var(--muted);
+      max-width: 900px;
+      margin: 0 0 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .chip {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin: 0 4px 4px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .good { color: var(--accent); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+  </style>
+  <script id="agent-metadata" type="application/json">
+  {
+    "document_type": "implementation_note",
+    "project": "BlockDAG ASIC pool",
+    "feature_branch": "feature/pool-submit-stall-template-recovery",
+    "extension_branch": "feature/pool-template-conversion-stall-recovery",
+    "created": "2026-05-10",
+    "purpose": "Recover stuck submit/job/template state inside the pool binary before the external watchdog has to restart the container.",
+    "primary_files": [
+      "internal/pool/server/submit_recovery.go",
+      "internal/pool/server/handler.go",
+      "internal/pool/server/jobBroadcast.go",
+      "internal/pool/server/rpc_router.go",
+      "cmd/pool/main.go"
+    ],
+    "feature_flags": [
+      "POOL_SUBMIT_STALL_RECOVERY_ENABLED",
+      "POOL_SUBMIT_STALL_RECOVERY_WINDOW_SECONDS",
+      "POOL_SUBMIT_STALL_RECOVERY_MIN_AGE_SECONDS",
+      "POOL_SUBMIT_STALL_RECOVERY_FAILURE_THRESHOLD",
+      "POOL_SUBMIT_STALL_RECOVERY_STALE_THRESHOLD",
+      "POOL_SUBMIT_STALL_RECOVERY_DUPLICATE_THRESHOLD",
+      "POOL_SUBMIT_STALL_RECOVERY_COOLDOWN_SECONDS",
+      "POOL_TEMPLATE_CONVERSION_STALL_RECOVERY_ENABLED",
+      "POOL_TEMPLATE_CONVERSION_STALL_WINDOW_SECONDS",
+      "POOL_TEMPLATE_CONVERSION_STALL_MIN_AGE_SECONDS",
+      "POOL_TEMPLATE_CONVERSION_STALL_MIN_CANDIDATES",
+      "POOL_TEMPLATE_CONVERSION_STALL_FAILURE_RATIO_PERCENT",
+      "POOL_TEMPLATE_CONVERSION_STALL_MIN_ACTIVE_MINERS",
+      "POOL_TEMPLATE_CONVERSION_STALL_COOLDOWN_SECONDS"
+    ]
+  }
+  </script>
+</head>
+<body>
+  <!-- AGENT: Keep this note with the feature branch and update it if thresholds or recovery action changes. -->
+  <main>
+    <header>
+      <h1>Pool Submit Stall Template Recovery</h1>
+      <p class="lede">This feature makes the pool binary detect a zero-success block-submit stall and repair its own job/template state before the watchdog has to restart the pool.</p>
+      <span class="chip good">Pool-only change</span>
+      <span class="chip">Feature flagged</span>
+      <span class="chip">Router-aware</span>
+      <span class="chip">Clean Stratum notify</span>
+      <span class="chip">Prometheus metric</span>
+      <span class="chip warn">Conversion ratio guard</span>
+    </header>
+
+    <section>
+      <h2>Problem</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Observed Failure</h3>
+          <p>Miners can keep submitting block candidates while the node rejects every candidate as duplicate, overdue, expired, or stale. Hashing continues, but monetized accepted blocks drop to zero.</p>
+        </article>
+        <article class="card">
+          <h3>Why The Watchdog Was Late</h3>
+          <p>The external watchdog sees the failure after the fact and restarts the pool. That works, but costs minutes of degraded mining.</p>
+        </article>
+        <article class="card">
+          <h3>Root Pool Weakness</h3>
+          <p>The old refresh path cleared the template cache, but a same-template refresh could still be sent with <code>clean_jobs=false</code>, leaving ASICs free to continue work against a poisoned job.</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>Recovery Design</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>What happens</th>
+            <th>Why it helps</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Detect zero-success failure window</td>
+            <td>The pool tracks block-candidate failures since the last successful node submit.</td>
+            <td>Recovery is based on failed monetization, not normal share noise.</td>
+          </tr>
+          <tr>
+            <td>Classify dangerous reasons</td>
+            <td>RPC stale/overdue/expired errors, RPC duplicate errors, local duplicate block, and global duplicate block failures contribute to the stall detector.</td>
+            <td>These are the signatures seen when the pool is working against an unusable job/template path.</td>
+          </tr>
+          <tr>
+            <td>Track poor candidate conversion</td>
+            <td>The pool also tracks accepted versus failed block-candidate outcomes across a rolling window, so a few intermittent accepted blocks no longer hide a mostly broken template/backend path.</td>
+            <td>This closes the failure mode observed on 2026-05-17 where accepted blocks were not zero, but miner-normalized block conversion collapsed for more than two hours.</td>
+          </tr>
+          <tr>
+            <td>Refresh the configured node</td>
+            <td>If the RPC router detects a submit stall, the current node is marked <code>submit-stall</code> and the pool forces a clean template refresh on the configured node.</td>
+            <td>A stuck node should not hold the pool when the next refresh can clear the poisoned job state.</td>
+          </tr>
+          <tr>
+            <td>Force clean template refresh</td>
+            <td>The current template key is invalidated so even an identical template forces <code>clean_jobs=true</code>.</td>
+            <td>ASICs abandon the poisoned job instead of continuing to submit doomed candidates.</td>
+          </tr>
+          <tr>
+            <td>Adopt direct-broadcast parents</td>
+            <td>Any direct recovery broadcast records the template parent in the pool's current-parent state before miners submit against it.</td>
+            <td>Recovery jobs are not incorrectly rejected as locally stale after a forced clean refresh.</td>
+          </tr>
+          <tr>
+            <td>Invalidate accepted jobs</td>
+            <td>Existing accepted job records are marked stale and invalidated just before broadcasting the recovery job.</td>
+            <td>Late submits against old jobs are rejected locally instead of wasting node RPC capacity.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Configuration</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Environment variable</th>
+            <th>Default</th>
+            <th>Purpose</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_ENABLED</code></td><td><code>true</code></td><td>Feature flag for the whole recovery path.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_WINDOW_SECONDS</code></td><td><code>60</code></td><td>Rolling failure window.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_MIN_AGE_SECONDS</code></td><td><code>30</code></td><td>Minimum zero-success duration before recovery, so normal stale/duplicate bursts after accepted blocks do not trigger a disruptive refresh.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_FAILURE_THRESHOLD</code></td><td><code>8</code></td><td>Total block-candidate failures needed to recover.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_STALE_THRESHOLD</code></td><td><code>3</code></td><td>Fast trigger for overdue, expired, stale-parent, or stale-job failures.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_DUPLICATE_THRESHOLD</code></td><td><code>6</code></td><td>Fast trigger for duplicate block storms.</td></tr>
+          <tr><td><code>POOL_SUBMIT_STALL_RECOVERY_COOLDOWN_SECONDS</code></td><td><code>20</code></td><td>Minimum time between automated pool-native recoveries.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_RECOVERY_ENABLED</code></td><td><code>true</code></td><td>Feature flag for ratio-based recovery when candidate block conversion becomes unhealthy despite intermittent accepts.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_WINDOW_SECONDS</code></td><td><code>120</code></td><td>Rolling accepted-versus-failed candidate window.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_MIN_AGE_SECONDS</code></td><td><code>30</code></td><td>Minimum observation time before ratio-based recovery can fire.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_MIN_CANDIDATES</code></td><td><code>40</code></td><td>Minimum block-candidate sample size before the ratio is trusted.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_FAILURE_RATIO_PERCENT</code></td><td><code>85</code></td><td>Failed candidate percentage that triggers recovery.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_MIN_ACTIVE_MINERS</code></td><td><code>1</code></td><td>Minimum active authorized miners required before recovery can trigger.</td></tr>
+          <tr><td><code>POOL_TEMPLATE_CONVERSION_STALL_COOLDOWN_SECONDS</code></td><td><code>30</code></td><td>Minimum time between ratio-based recoveries.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Validation</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Unit Tests</h3>
+          <p>Submit recovery tests verify threshold behavior, accepted-submit reset behavior, and stale/duplicate fast triggers.</p>
+        </article>
+        <article class="card">
+          <h3>Node Health Test</h3>
+          <p>A node-health test verifies that submit-stall recovery marks the configured node unhealthy and forces a fresh template path before miners continue.</p>
+        </article>
+        <article class="card">
+          <h3>Operational Metric</h3>
+          <p><code>pool_submit_stall_recoveries_total{action,reason}</code> and <code>pool_template_conversion_stall_recoveries_total{action,reason}</code> record started recoveries and clean refreshes.</p>
+          <p><code>pool_template_conversion_stall_window_candidates{kind}</code> and <code>pool_template_conversion_stall_failure_ratio</code> expose the rolling health window used by the new guard.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

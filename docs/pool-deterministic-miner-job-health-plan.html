@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pool Deterministic Miner Job Health Plan</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #1d2433;
+      --muted: #647084;
+      --line: #d8deea;
+      --accent: #1769aa;
+      --ok: #1b7f4b;
+      --warn: #a56300;
+    }
+    body {
+      margin: 0;
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 24px;
+      padding-bottom: 18px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 28px 0 12px;
+      font-size: 18px;
+    }
+    p {
+      margin: 0 0 12px;
+    }
+    code {
+      background: rgba(23, 105, 170, 0.08);
+      border: 1px solid rgba(23, 105, 170, 0.18);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-size: 0.92em;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin-right: 6px;
+      font-size: 12px;
+      font-weight: 650;
+      background: rgba(23, 105, 170, 0.1);
+      color: var(--accent);
+    }
+    .ok { color: var(--ok); font-weight: 650; }
+    .warn { color: var(--warn); font-weight: 650; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: rgba(23, 105, 170, 0.08);
+      font-size: 13px;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    pre {
+      overflow: auto;
+      background: #101828;
+      color: #f6f8fb;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Pool Deterministic Miner Job Health</h1>
+    <p><span class="tag">Repo: pool</span><span class="tag">Branch: feature/pool-deterministic-miner-job-health</span><span class="tag">Risk: observe-only</span></p>
+    <p>This task turns Stratum miner/job state into explicit source-level signals, so dashboards and watchdogs do not infer pool health from log text or indirect submit-error bursts.</p>
+  </header>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Problem</h2>
+      <p>The pool currently has good counters for accepted shares, rejected shares, backend routing, and recovery actions. It does not expose a deterministic snapshot of whether connected miners have a current, non-stale, non-invalidated job.</p>
+    </div>
+    <div class="card">
+      <h2>Goal</h2>
+      <p>Expose passive aggregate metrics and an internal JSON health endpoint that show miner readiness, current-job freshness, accepted-job pressure, and clear reason codes.</p>
+    </div>
+    <div class="card">
+      <h2>Non-Goal</h2>
+      <p>No mining behavior, job broadcast policy, VarDiff policy, backend routing, ASIC configuration, Docker services, or live stack state changes in this PR.</p>
+    </div>
+  </section>
+
+  <h2>Signals To Add</h2>
+  <table>
+    <thead>
+      <tr><th>Signal</th><th>Use</th><th>Cardinality</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>pool_job_health_ok</code></td><td>Single gauge for watchdog/dashboard alerting.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_authorized_miners</code></td><td>How many connected clients are authorized to mine.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_ready_miners</code></td><td>How many authorized clients have a current usable job.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_miners_without_current_job</code></td><td>Detects authorization/subscription/job-send gaps before submit errors appear.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_current_job_stale_miners</code></td><td>Shows stale jobs still assigned to active miners.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_current_job_invalidated_miners</code></td><td>Shows miners still pointed at explicitly invalidated jobs.</td><td>Aggregate only</td></tr>
+      <tr><td><code>pool_job_health_max_current_job_age_seconds</code></td><td>Shows current-job age pressure relative to the local TTL.</td><td>Aggregate only</td></tr>
+      <tr><td><code>/health/job-state</code></td><td>Internal JSON endpoint for richer dashboard/watchdog diagnostics.</td><td>Per-client JSON, no Prometheus labels</td></tr>
+    </tbody>
+  </table>
+
+  <h2>JSON Shape</h2>
+  <pre>{
+  "status": "ok|degraded",
+  "reason_code": "ok|no_miners|no_current_template|mines_without_current_job|stale_current_job|invalidated_current_job|expired_current_job",
+  "active_connections": 7,
+  "authorized_connections": 7,
+  "ready_connections": 7,
+  "current_template_seq": 1234,
+  "last_broadcast_age_ms": 850,
+  "accepted_jobs": 42,
+  "accepted_jobs_stale": 2,
+  "accepted_jobs_invalidated": 0,
+  "clients": [
+    {
+      "address": "192.168.1.114:40210",
+      "remote_host": "192.168.1.114",
+      "asic_mac": "28:e2:97:4d:44:3a",
+      "lane_id": "mac:28:e2:97:4d:44:3a",
+      "lane_identity_source": "mac",
+      "authorized": true,
+      "subscribed": true,
+      "ready": true,
+      "reason_code": "ok",
+      "current_job_id": "1234-abcd_01000000",
+      "current_job_age_ms": 850,
+      "template_seq": 1234,
+      "backend": "node",
+      "pdiff": 1.0
+    }
+  ]
+}</pre>
+
+  <h2>Implementation Notes</h2>
+  <ul>
+    <li>Use existing globals: <code>clients</code>, <code>acceptedJobs</code>, <code>lastSeq</code>, <code>lastBroadcastTime</code>, and per-client <code>currentJob</code>.</li>
+    <li>Expose per-client ASIC identity as <code>remote_host</code>, <code>asic_mac</code>, <code>lane_id</code>, and <code>lane_identity_source</code>. Configured/local ASIC LAN lanes are MAC-only; remote Stratum clients outside <code>BDAG_ASIC_LAN_CIDRS</code> may use IP lanes. Payout wallet usernames are not lane identities.</li>
+    <li>Keep Prometheus metrics aggregate-only to avoid high-cardinality miner labels.</li>
+    <li>Sort JSON client rows for deterministic dashboard output and predictable tests.</li>
+    <li>Expose the endpoint on the existing metrics HTTP server, alongside <code>/metrics</code>, so no new process or port is required.</li>
+  </ul>
+
+  <h2>Definition Of Done</h2>
+  <ul>
+    <li class="ok">Design committed before behavior changes.</li>
+    <li>New endpoint and gauges are passive and source-only.</li>
+    <li>Unit tests cover healthy, missing-current-job, stale, invalidated, and expired-current-job cases.</li>
+    <li>Focused tests pass: <code>go test ./internal/pool/server -run 'TestPoolJobHealth|TestJobHealth' -count=1</code>.</li>
+    <li>Package tests pass for <code>./internal/pool/server</code>.</li>
+  </ul>
+</main>
+<script type="application/json" id="agent-metadata">
+{
+  "repo": "BlockdagEngineering/pool",
+  "branch": "feature/pool-deterministic-miner-job-health",
+  "base": "origin/feature/pool-expired-global-clean-client-gate",
+  "risk": "observe-only",
+  "live_services_touched": false,
+  "target_files": [
+    "docs/pool-deterministic-miner-job-health-plan.html",
+    "internal/pool/server/health.go",
+    "internal/pool/server/health_test.go",
+    "internal/pool/server/metrics.go"
+  ],
+  "goal": "Expose deterministic miner/job readiness signals for dashboard and watchdog consumers without changing mining behavior."
+}
+</script>
+</body>
+</html>

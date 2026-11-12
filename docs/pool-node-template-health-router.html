@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pool Node Template Health Router</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101419;
+      --panel: #171d25;
+      --panel-2: #202935;
+      --line: #344354;
+      --text: #edf4f7;
+      --muted: #aeb9c4;
+      --good: #61d394;
+      --warn: #f0c55a;
+      --bad: #ff6f6f;
+      --accent: #7bb7ff;
+    }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
+    main { max-width: 1160px; margin: 0 auto; padding: 30px 20px 48px; }
+    h1 { margin: 0 0 8px; font-size: 2rem; }
+    h2 { margin-top: 28px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+    code, pre { background: #0b0f14; color: #dff5ff; border: 1px solid var(--line); border-radius: 6px; }
+    code { padding: 1px 5px; }
+    pre { padding: 12px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+    th, td { border: 1px solid var(--line); padding: 9px 10px; vertical-align: top; }
+    th { background: var(--panel-2); text-align: left; }
+    .lede { color: var(--muted); max-width: 900px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; margin: 0 4px 6px 0; color: var(--muted); }
+    .good { color: var(--good); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    .accent { color: var(--accent); }
+  </style>
+  <script id="agent-metadata" type="application/json">
+  {
+    "document_type": "implementation_note",
+    "created": "2026-05-10",
+    "repo": "BlockdagEngineering/pool",
+    "branch": "feature/pool-node-template-health-router",
+    "base_branch": "feature/pool-submit-stall-template-recovery",
+    "depends_on": [
+      "BlockdagEngineering/blockdag-corechain#7 exposes getTemplateHealth",
+      "BlockdagEngineering/blockdag-corechain#8 adds structured submit outcomes"
+    ],
+    "feature_flag": "POOL_RPC_ROUTER_NODE_HEALTH_ENABLED",
+    "goal": "Move backend mining-readiness decisions from log inference to source-level node health signals.",
+    "false_negative_guard": "Transient node_syncing/timeout probes stay advisory while a fresh template exists, and only become hard routing input after consecutive failures."
+  }
+  </script>
+</head>
+<body>
+  <!-- AGENT: This note explains the pool-side integration for corechain mining-template health. -->
+  <main>
+    <header>
+      <h1>Pool Node Template Health Router</h1>
+      <p class="lede">The pool can consume the single configured node's mining-template health RPC and use it to pause unsafe template or submit work while keeping template-fetch and submit-path checks as fallback signals. This adds a clean source-level contract for node readiness.</p>
+      <span class="chip good">Opt-in</span>
+      <span class="chip">No production deployment in this commit</span>
+      <span class="chip">Consumes <code>getTemplateHealth</code></span>
+      <span class="chip">Reduces watchdog guessing</span>
+    </header>
+
+    <section>
+      <h2>What Changed</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Health Probe</h3>
+          <p>The pool can call <code>getTemplateHealth</code> on the configured node at a low rate. The call is disabled by default until patched corechain nodes are deployed.</p>
+        </article>
+        <article class="card">
+          <h3>Router Input</h3>
+          <p>The router records <code>mineable_now</code>, <code>submit_ready</code>, template age, template sequence, main order, and reason codes in each backend state.</p>
+        </article>
+        <article class="card">
+          <h3>Automatic Fallback</h3>
+          <p>If the selected node reports it is not mineable or not submit-ready, the router marks it unhealthy and keeps template or submit recovery on the single configured node.</p>
+        </article>
+        <article class="card">
+          <h3>Rolling Compatibility</h3>
+          <p>If a backend returns method-not-found, the pool marks node health unsupported but does not fail closed. Existing template and submit signals remain authoritative.</p>
+        </article>
+        <article class="card">
+          <h3>False-Negative Hysteresis</h3>
+          <p>Transient <code>node_syncing</code>, timeout, or retryable health failures are advisory while the node still has fresh template evidence. They only fail routing after repeated consecutive samples.</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>Configuration</h2>
+      <table>
+        <thead><tr><th>Environment Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_ENABLED</code></td><td><code>true</code></td><td>Enables the source-level node health probe.</td></tr>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_PROBE_SECONDS</code></td><td><code>15</code></td><td>Probe interval for the configured node RPC endpoint. Positive values below <code>10</code> are rejected; <code>10</code> seconds is the hard minimum.</td></tr>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_MAX_AGE_SECONDS</code></td><td><code>30</code></td><td>Maximum node-reported template age before the router treats the backend as stale.</td></tr>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_UNREADY_THRESHOLD</code></td><td><code>3</code></td><td>Consecutive unready health samples required before a fresh-template backend is marked unhealthy.</td></tr>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_ERROR_THRESHOLD</code></td><td><code>3</code></td><td>Consecutive health RPC failures required before a fresh-template backend is marked unhealthy.</td></tr>
+          <tr><td><code>POOL_RPC_ROUTER_NODE_HEALTH_FRESH_TEMPLATE_GRACE_SECONDS</code></td><td><code>15</code></td><td>How recent pool/node template evidence must be for transient health failures to remain advisory.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>New Pool Metrics</h2>
+      <table>
+        <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>pool_rpc_backend_node_health_mineable</code></td><td>1 when the node says it is mineable now.</td></tr>
+          <tr><td><code>pool_rpc_backend_node_health_submit_ready</code></td><td>1 when the node says solved blocks should be submitted to this backend.</td></tr>
+          <tr><td><code>pool_rpc_backend_node_health_template_age_seconds</code></td><td>Node-reported template age.</td></tr>
+          <tr><td><code>pool_rpc_backend_node_health_template_sequence</code></td><td>Node-reported latest template sequence.</td></tr>
+          <tr><td><code>pool_rpc_backend_node_health_main_order</code></td><td>Node-reported main-order height.</td></tr>
+          <tr><td><code>pool_rpc_backend_node_health_errors_total</code></td><td>Probe failures by backend and reason.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Why It Matters</h2>
+      <p>Most mining losses we observed were not caused by raw CPU shortage. They were caused by miners receiving work from a backend that was technically reachable but operationally poor for mining: stale template, sync ambiguity, submit path not ready, or peer/template state behind the useful DAG frontier. This feature gives the pool a direct node-level signal before the external watchdog has to infer failure from logs, stale shares, and submit errors.</p>
+    </section>
+
+    <section>
+      <h2>Validation</h2>
+      <pre><code>go test ./internal/pool/server</code></pre>
+      <p class="lede">The focused tests cover config parsing, backend switching after persistent unmineable health, advisory handling for transient timeouts, and rolling compatibility when the node does not yet expose <code>getTemplateHealth</code>.</p>
+    </section>
+  </main>
+</body>
+</html>
