@@ -19,6 +19,17 @@ type criticalPathJournal struct {
 	completionBudget time.Duration
 }
 
+type slowDiscoveryJournal struct{ criticalPathJournal }
+
+func (j *slowDiscoveryJournal) DiscoverCandidateV2(ctx context.Context, candidate FrozenCandidateV1, freeze func() (storage.AcceptedAccountingIntentV2, error)) (CandidateViewV1, storage.PutDisposition, error) {
+	select {
+	case <-time.After(60 * time.Millisecond):
+		return j.coordinatorJournal.DiscoverCandidateV2(ctx, candidate, freeze)
+	case <-ctx.Done():
+		return CandidateViewV1{}, "", ctx.Err()
+	}
+}
+
 func (j *criticalPathJournal) ReadSubmissionMetrics(ctx context.Context) (storage.SubmissionMetricsV1, error) {
 	if j.metricsEntered != nil {
 		close(j.metricsEntered)
@@ -122,5 +133,18 @@ func TestRPCTimeoutDurablyCompletesPendingSQLAttempt(t *testing.T) {
 	view, attempts, receipts, _ := reopenServerJournal(t, databaseURL, candidate.CandidateID)
 	if view.State != storage.SubmissionStatePending || attempts != 1 || receipts != 0 {
 		t.Fatalf("timeout SQL state/attempt/receipt = %q/%d/%d", view.State, attempts, receipts)
+	}
+}
+
+func TestCandidatePersistenceHasIndependentBudgetFromRPCTimeout(t *testing.T) {
+	ensureSubmissionTestMetrics()
+	job, header, extra, share := testSubmissionJob()
+	installCriticalPathRPC(t, func(w http.ResponseWriter, r *http.Request) { time.Sleep(80 * time.Millisecond) })
+	journal := &slowDiscoveryJournal{}
+	c := newSubmissionCoordinator(journal, big.NewInt(1043), "node", nil)
+	c.timeout = 20 * time.Millisecond
+	result := c.submitFrozenCandidate(&client{}, job, header, extra, share, map[string]uint64{"miner": 10}, 10, 1)
+	if result.Err != nil || result.Decision != storage.SubmitDecisionPending || result.Transition.State != storage.SubmissionStatePending || len(journal.completed) != 1 {
+		t.Fatalf("database latency consumed the RPC deadline or lost timeout evidence: %+v", result)
 	}
 }

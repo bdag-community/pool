@@ -62,6 +62,52 @@ func TestConfigurePoolCoinbaseAddressRejectsMissingAddress(t *testing.T) {
 	}
 }
 
+func TestConfigurePoolCoinbaseAddressValidatesSigningKey(t *testing.T) {
+	withPoolCoinbase(t, testPoolCoinbase)
+	const key = "0000000000000000000000000000000000000000000000000000000000000001"
+	const correspondingAddress = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{"matching key and address", Config{PoolPrivateKey: key, PoolCoinbaseAddress: correspondingAddress}, false},
+		{"key only", Config{PoolPrivateKey: key}, false},
+		{"different address", Config{PoolPrivateKey: key, PoolCoinbaseAddress: testPoolCoinbase}, true},
+		{"malformed key", Config{PoolPrivateKey: "invalid", PoolCoinbaseAddress: correspondingAddress}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := poolAddress
+			err := configurePoolCoinbaseAddress(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("configuration error = %v, want error %t", err, tc.wantErr)
+			}
+			if tc.wantErr && poolAddress != before {
+				t.Fatal("invalid configuration changed the pool address")
+			}
+			if !tc.wantErr && poolAddress != common.HexToAddress(correspondingAddress).Hex() {
+				t.Fatalf("pool address = %s, want signing-key address", poolAddress)
+			}
+		})
+	}
+}
+
+func TestUnjournaledPayoutCannotBeEnabledByWalletConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		cfg     Config
+		wantErr bool
+	}{
+		{Config{}, false},
+		{Config{PoolPrivateKey: "key"}, false},
+		{Config{WalletRPCURL: "http://127.0.0.1:8545"}, false},
+		{Config{PoolPrivateKey: "key", WalletRPCURL: "http://127.0.0.1:8545"}, true},
+	} {
+		if err := rejectUnjournaledPayout(tc.cfg); (err != nil) != tc.wantErr {
+			t.Fatalf("legacy payout guard error = %v, want error %t", err, tc.wantErr)
+		}
+	}
+}
+
 func TestBuildNotifyFillsMissingTemplateCoinbaseFromConfiguredPoolAddress(t *testing.T) {
 	withPoolCoinbase(t, testPoolCoinbase)
 

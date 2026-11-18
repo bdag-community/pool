@@ -291,6 +291,8 @@ func main() {
 		SubmitBlockHeaderV2Enabled:                   submitBlockHeaderV2Enabled,
 		SubmitDebugResultEnabled:                     submitDebugResultEnabled,
 		WalletRPCURL:                                 walletRPCURL,
+		RewardIPCPath:                                os.Getenv("POOL_REWARD_IPC_PATH"),
+		RewardEVMRPCURL:                              os.Getenv("EVM_RPC_URL"),
 		RPCUser:                                      rpcUser,
 		RPCPassword:                                  rpcPassword,
 		PPLNSTargetWork:                              pplnsWork,

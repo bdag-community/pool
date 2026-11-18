@@ -163,8 +163,21 @@ func TestSubmissionReconcilerPostgresProcessRestartPreparedOrphanAccepted(t *tes
 	if err != nil || !bytes.Equal(oldBody, wantOldBody) {
 		t.Fatalf("phase-A prepared bytes got=%q want=%q err=%v", oldBody, wantOldBody, err)
 	}
+	// Wait on the actual database lease instead of assuming that a fixed sleep
+	// covers process scheduling and setup under constrained hosts.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	tag, err := pool.Exec(waitCtx, `SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM (lease_expires_at-clock_timestamp())),0)+0.05) FROM block_submission_state_v1 WHERE candidate_id=$1 AND state='in_flight'`, candidate.CandidateID[:])
+	if err != nil || tag.RowsAffected() != 1 {
+		waitCancel()
+		t.Fatalf("wait for real lease expiry: rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	var expired bool
+	if err = pool.QueryRow(waitCtx, `SELECT lease_expires_at <= clock_timestamp() FROM block_submission_state_v1 WHERE candidate_id=$1 AND state='in_flight'`, candidate.CandidateID[:]).Scan(&expired); err != nil || !expired {
+		waitCancel()
+		t.Fatalf("lease did not expire: expired=%t err=%v", expired, err)
+	}
+	waitCancel()
 	pool.Close()
-	time.Sleep(220 * time.Millisecond)
 	runSubmissionRestartChildWithEndpoint(t, "phase-b", server.URL)
 	if calls.Load() != 1 || !bytes.Equal(outbound, oldBody) {
 		t.Fatalf("phase-B calls/body=%d/%x, want 1/%x", calls.Load(), outbound, oldBody)
@@ -291,7 +304,7 @@ func runSubmissionRestartChild(t *testing.T, phase string) {
 		if _, disposition, err := journal.PutCandidate(context.Background(), candidate, testAcceptedAccounting(t, candidate)); err != nil || disposition != storage.PutDispositionInserted {
 			t.Fatalf("phase-A candidate: %q %v", disposition, err)
 		}
-		lease, err := journal.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{1}, 100*time.Millisecond)
+		lease, err := journal.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{1}, 5*time.Second)
 		if err != nil || lease == nil {
 			t.Fatalf("phase-A lease: %#v %v", lease, err)
 		}

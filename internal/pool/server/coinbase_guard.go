@@ -16,12 +16,31 @@ var (
 	lastVerifiedTemplateCoinbase   string
 )
 
+// The legacy payer broadcasts before recording a credit and does not verify a
+// canonical transaction receipt. Keep it unavailable while the journaled payer
+// is integrated and qualified; do not expose the signing key to that path.
+func rejectUnjournaledPayout(cfg Config) error {
+	if strings.TrimSpace(cfg.PoolPrivateKey) != "" && strings.TrimSpace(cfg.WalletRPCURL) != "" {
+		return fmt.Errorf("legacy unjournaled payout signing is disabled; qualified payment worker required")
+	}
+	return nil
+}
+
 func configurePoolCoinbaseAddress(cfg Config) error {
 	explicit := strings.TrimSpace(cfg.PoolCoinbaseAddress)
 	if explicit != "" {
 		normalized, err := normalizePoolCoinbaseAddress(explicit)
 		if err != nil {
 			return fmt.Errorf("invalid pool coinbase address %q: %w", explicit, err)
+		}
+		if strings.TrimSpace(cfg.PoolPrivateKey) != "" {
+			derived, err := derivePoolCoinbaseAddress(cfg.PoolPrivateKey)
+			if err != nil {
+				return fmt.Errorf("derive pool coinbase from private key: %w", err)
+			}
+			if derived != normalized {
+				return fmt.Errorf("pool coinbase address does not match payout signing key")
+			}
 		}
 		poolAddress = normalized
 		rememberVerifiedTemplateCoinbase(normalized)

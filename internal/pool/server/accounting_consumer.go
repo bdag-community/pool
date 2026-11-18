@@ -21,11 +21,12 @@ type wideAcceptedAccountingJournal interface {
 }
 
 type acceptedAccountingConsumer struct {
-	journal          storage.SubmissionJournal
-	interval         time.Duration
-	stop             <-chan struct{}
-	wg               sync.WaitGroup
-	metricsPublisher *submissionMetricsPublisherV1
+	journal           storage.SubmissionJournal
+	interval          time.Duration
+	stop              <-chan struct{}
+	wg                sync.WaitGroup
+	metricsPublisher  *submissionMetricsPublisherV1
+	reconcileOverride func(context.Context) (storage.AcceptedAccountingReconcileResultV2, error)
 }
 
 func newAcceptedAccountingConsumer(journal storage.SubmissionJournal, interval time.Duration, stop <-chan struct{}, publisher ...*submissionMetricsPublisherV1) *acceptedAccountingConsumer {
@@ -42,6 +43,16 @@ func newAcceptedAccountingConsumer(journal storage.SubmissionJournal, interval t
 func (c *acceptedAccountingConsumer) reconcileOne(ctx context.Context) error {
 	if c == nil || c.journal == nil {
 		return errors.New("accepted accounting consumer is unavailable")
+	}
+	if c.reconcileOverride != nil {
+		result, err := c.reconcileOverride(ctx)
+		if err != nil {
+			return err
+		}
+		if result.Applied != 0 {
+			log.Printf("accepted accounting reconciliation applied=%d", result.Applied)
+		}
+		return c.metricsPublisher.update(ctx, c.journal)
 	}
 	if wide, ok := c.journal.(wideAcceptedAccountingJournal); ok {
 		result, err := wide.ReconcileAcceptedAccountingV2(ctx)

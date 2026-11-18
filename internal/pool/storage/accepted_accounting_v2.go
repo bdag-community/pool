@@ -632,11 +632,26 @@ func (s *PostgresStorage) verifyAcceptedAccountingV2(ctx context.Context, offlin
 	if s == nil || s.pool == nil {
 		return errors.New("accepted accounting database is not connected")
 	}
-	if err := verifyAcceptedAccountingCatalogV2(ctx, s.pool); err != nil {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer rollbackUnpricedTx(tx)
+	if err = s.verifyAcceptedAccountingV2Tx(ctx, tx, offlineConflict, false); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// The optional unpriced exclusion is used only after every corresponding row
+// has been verified in this same transaction and snapshot. Legacy V2 callers
+// always pass false and continue to reject every candidate lacking an intent.
+func (s *PostgresStorage) verifyAcceptedAccountingV2Tx(ctx context.Context, tx pgx.Tx, offlineConflict []byte, allowVerifiedUnpriced bool) error {
+	if err := verifyAcceptedAccountingCatalogV2(ctx, tx); err != nil {
 		return err
 	}
 	var bad int64
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM accepted_block_accounting_intents_v1 WHERE policy_version NOT IN ($1,$2) OR gross_reward<0 OR fee_amount<0 OR distributable<0 OR gross_reward>=power(10::numeric,30) OR fee_amount>=power(10::numeric,30) OR distributable>=power(10::numeric,30)`, AcceptedAccountingPolicyV1, AcceptedAccountingPolicyV2).Scan(&bad)
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM accepted_block_accounting_intents_v1 WHERE policy_version NOT IN ($1,$2) OR gross_reward<0 OR fee_amount<0 OR distributable<0 OR gross_reward>=power(10::numeric,30) OR fee_amount>=power(10::numeric,30) OR distributable>=power(10::numeric,30)`, AcceptedAccountingPolicyV1, AcceptedAccountingPolicyV2).Scan(&bad)
 	if err != nil {
 		return err
 	}
@@ -644,22 +659,26 @@ func (s *PostgresStorage) verifyAcceptedAccountingV2(ctx context.Context, offlin
 		return errors.New("accepted accounting v2 catalog/data drift")
 	}
 	var conflicts, missingIntents, orphanLines, badLineCounts int64
-	if err := s.pool.QueryRow(ctx, `SELECT
+	missingPredicate := `i.candidate_id IS NULL`
+	if allowVerifiedUnpriced {
+		missingPredicate += ` AND NOT EXISTS (SELECT 1 FROM pool_share_journal_v1.unpriced_discoveries_v1 d WHERE d.candidate_id=c.candidate_id)`
+	}
+	if err := tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM accepted_block_accounting_conflicts_v1),
-		(SELECT count(*) FROM block_submission_candidates_v1 c LEFT JOIN accepted_block_accounting_intents_v1 i USING(candidate_id) WHERE i.candidate_id IS NULL),
+		(SELECT count(*) FROM block_submission_candidates_v1 c LEFT JOIN accepted_block_accounting_intents_v1 i USING(candidate_id) WHERE `+missingPredicate+`),
 		(SELECT count(*) FROM accepted_block_accounting_credit_lines_v1 l LEFT JOIN accepted_block_accounting_intents_v1 i USING(candidate_id) WHERE i.candidate_id IS NULL),
 		(SELECT count(*) FROM accepted_block_accounting_intents_v1 i WHERE i.credit_line_count<>(SELECT count(*) FROM accepted_block_accounting_credit_lines_v1 l WHERE l.candidate_id=i.candidate_id))`).Scan(&conflicts, &missingIntents, &orphanLines, &badLineCounts); err != nil {
 		return err
 	}
 	if conflicts != 0 {
 		if offlineConflict != nil {
-			if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM accepted_block_accounting_conflicts_v1 WHERE conflict_id<>$1`, offlineConflict).Scan(&conflicts); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM accepted_block_accounting_conflicts_v1 WHERE conflict_id<>$1`, offlineConflict).Scan(&conflicts); err != nil {
 				return err
 			}
 		} else {
 			query, args := s.accountingConflictLatchSQLV1(1)
 			var latched bool
-			if err := s.pool.QueryRow(ctx, "SELECT "+query, args...).Scan(&latched); err != nil {
+			if err := tx.QueryRow(ctx, "SELECT "+query, args...).Scan(&latched); err != nil {
 				return err
 			}
 			if !latched {
@@ -670,11 +689,6 @@ func (s *PostgresStorage) verifyAcceptedAccountingV2(ctx context.Context, offlin
 	if conflicts != 0 || missingIntents != 0 || orphanLines != 0 || badLineCounts != 0 {
 		return fmt.Errorf("accepted accounting v2 verification failed conflicts=%d missing_intents=%d orphan_lines=%d bad_line_counts=%d", conflicts, missingIntents, orphanLines, badLineCounts)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `SELECT candidate_id,policy_version FROM accepted_block_accounting_intents_v1 ORDER BY candidate_id`)
 	if err != nil {
 		return err
@@ -767,5 +781,5 @@ func (s *PostgresStorage) verifyAcceptedAccountingV2(ctx context.Context, offlin
 			return errors.New("unsupported accepted accounting policy")
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }

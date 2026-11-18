@@ -120,6 +120,8 @@ type Config struct {
 	SubmitBlockHeaderV2Enabled                   bool
 	SubmitDebugResultEnabled                     bool
 	WalletRPCURL                                 string // EVM RPC for Payouts
+	RewardIPCPath                                string // owner-only node reward socket
+	RewardEVMRPCURL                              string // EVM RPC for canonical reward checks
 	RPCUser                                      string
 	RPCPassword                                  string
 	PPLNSTargetWork                              float64
@@ -352,6 +354,9 @@ func Run(cfg Config) error {
 	InitMetrics(poolID)
 	publishBlockTimingControllerRuntime()
 
+	if err := rejectUnjournaledPayout(cfg); err != nil {
+		return err
+	}
 	if err := configurePoolCoinbaseAddress(cfg); err != nil {
 		return err
 	}
@@ -391,7 +396,22 @@ func Run(cfg Config) error {
 	if err := journal.VerifySubmissionJournalV1(context.Background(), chainID, activeSubmissionBackendID); err != nil {
 		return fmt.Errorf("durable submission journal verification failed: %w", err)
 	}
-	if err := reconcileAcceptedAccountingAtStartup(context.Background(), journal); err != nil {
+	reward, err := newRewardRuntime(cfg, pg, chainID, activeSubmissionBackendID)
+	if err != nil {
+		return fmt.Errorf("durable reward startup failed: %w", err)
+	}
+	if reward != nil {
+		defer reward.close()
+	}
+	startupAccounting := func() error {
+		if reward == nil {
+			return reconcileAcceptedAccountingAtStartup(context.Background(), journal)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		return reward.verifyAndReconcile(ctx)
+	}
+	if err := startupAccounting(); err != nil {
 		return fmt.Errorf("accepted accounting readiness failed: %w", err)
 	}
 	if _, err := journal.ReclaimExpiredLeases(context.Background()); err != nil {
@@ -429,11 +449,18 @@ func Run(cfg Config) error {
 			log.Println("✅ Wallet Client Connected (Local Signing)")
 		}
 	} else {
-		log.Println("⚠️ Wallet RPC or Private Key missing. Payouts will NOT be processed.")
+		if reward != nil {
+			log.Println("Pool rewards use the separate wallet-scoped payment worker.")
+		} else {
+			log.Println("⚠️ Wallet RPC or Private Key missing. Payouts will NOT be processed.")
+		}
 	}
 
 	shutdownChan := make(chan struct{})
 	activeSubmissionCoordinator = newSubmissionCoordinator(journal, chainID, activeSubmissionBackendID, &cfg)
+	if reward != nil {
+		activeSubmissionCoordinator.shareAccounting = reward.accounting
+	}
 	reconciler := newSubmissionReconciler(journal, activeSubmissionCoordinator, leaseDuration, reconcileInterval, shutdownChan)
 	if err := reconciler.reconcileOne(context.Background()); err != nil {
 		close(shutdownChan)
@@ -441,7 +468,7 @@ func Run(cfg Config) error {
 	}
 	// The readiness scan can accept a prepared orphan. Drain and verify once
 	// more so Stratum never opens with an accepted receipt lacking its effect.
-	if err := reconcileAcceptedAccountingAtStartup(context.Background(), journal); err != nil {
+	if err := startupAccounting(); err != nil {
 		close(shutdownChan)
 		return fmt.Errorf("post-reconciliation accepted accounting readiness failed: %w", err)
 	}
@@ -454,6 +481,11 @@ func Run(cfg Config) error {
 	}
 	reconciler.start()
 	accountingConsumer := newAcceptedAccountingConsumer(journal, reconcileInterval, shutdownChan, activeSubmissionCoordinator.metricsPublisher)
+	if reward != nil {
+		accountingConsumer.reconcileOverride = func(ctx context.Context) (storage.AcceptedAccountingReconcileResultV2, error) {
+			return pg.ReconcileAccountingWithUnpricedV1(ctx, chainID, activeSubmissionBackendID, reward.wallet)
+		}
+	}
 	accountingConsumer.start()
 
 	ln, err := net.Listen("tcp", listenAddr)
@@ -462,6 +494,9 @@ func Run(cfg Config) error {
 		reconciler.wait()
 		accountingConsumer.wait()
 		return err
+	}
+	if reward != nil {
+		reward.start()
 	}
 
 	// Graceful Shutdown Channel

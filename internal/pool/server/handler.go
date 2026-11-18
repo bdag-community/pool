@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"asicPool/internal/pool/sharejournal"
 	"asicPool/internal/pool/storage"
 )
 
@@ -328,6 +329,9 @@ func validateUser(username string) (bool, string) {
 	if !evmAddressPattern.MatchString(address) {
 		return false, "username should be a valid evm address"
 	}
+	if strings.TrimLeft(address[2:], "0") == "" {
+		return false, "zero address cannot receive pool payouts"
+	}
 
 	return true, ""
 }
@@ -348,11 +352,14 @@ func handleAuthorize(c *client, req *stratumRequest) {
 		return
 	}
 
+	bound, accepted := bindAuthorizedWorker(c, username)
+	if !accepted {
+		authorizationsTotal.WithLabelValues("failure").Inc()
+		sendError(c, req.ID, 24, "reconnect to change payout address")
+		return
+	}
+	username = bound
 	authorizationsTotal.WithLabelValues("success").Inc()
-	c.mu.Lock()
-	c.username = username
-	c.authorized = true
-	c.mu.Unlock()
 
 	// Track Miner in DB
 	if c.storage != nil {
@@ -373,6 +380,19 @@ func handleAuthorize(c *client, req *stratumRequest) {
 	sendResult(c, req.ID, true)
 	log.Printf("✅ [%s] authorize accepted user=%s", c.addr, username)
 	resendCurrentJobIfReady(c)
+}
+
+// A connection's jobs and in-flight shares must retain the payout identity
+// that was authorized for that connection. A new identity requires a reconnect.
+func bindAuthorizedWorker(c *client, username string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.authorized {
+		return c.username, strings.EqualFold(c.username, username)
+	}
+	c.username = username
+	c.authorized = true
+	return username, true
 }
 
 func resendCurrentJobIfReady(c *client) {
@@ -657,6 +677,42 @@ func (p *submitPipeline) run() error {
 	// Variables to capture recordShareAndAdjust results
 	var diffChanged bool
 	var newPdiff float64
+	coordinator := req.submissionCoordinator
+	if coordinator == nil {
+		coordinator = c.coordinator
+	}
+	var discoveryShare *sharejournal.Share
+	if !isLowDiff && coordinator != nil && coordinator.shareAccounting != nil {
+		work, workErr := acceptedShareWork(assignedPdiff)
+		if workErr != nil || coordinator.shareAccounting.journal == nil {
+			jobData.usedNonces.Delete(dupKey)
+			sharesRejected.WithLabelValues("accounting_unavailable").Inc()
+			sendError(c, req.ID, 20, "share accounting unavailable")
+			return nil
+		}
+		share := sharejournal.Share{ID: result, Miner: c.username, Work: work}
+		if isBlockCandidate {
+			discoveryShare = &share
+		} else {
+			persistCtx, cancel := context.WithTimeout(context.Background(), blockSubmissionPersistTimeout)
+			_, created, persistErr := coordinator.shareAccounting.journal.AppendAcceptedShareV1(persistCtx, share)
+			cancel()
+			if persistErr != nil {
+				// A retry resolves a lost commit acknowledgement by durable share ID.
+				jobData.usedNonces.Delete(dupKey)
+				sharesRejected.WithLabelValues("accounting_unavailable").Inc()
+				sendError(c, req.ID, 20, "share accounting pending")
+				return nil
+			}
+			if !created {
+				// The same accepted proof was already credited. Acknowledge a
+				// retry without adding its work or difficulty a second time.
+				sendSubmitAccepted(c, req.ID, header, result[:])
+				p.setLifecycle(jobData, lifecycleClassification, "accepted-share", "duplicate_durable_replay")
+				return nil
+			}
+		}
+	}
 
 	// ----------------------------------------------------------------
 	// 2) PUSH TO PPLNS (If valid share)
@@ -806,19 +862,18 @@ func (p *submitPipeline) run() error {
 		// result/hashInt were already computed from this exact header above.
 		// Re-running scrypt here doubles block-candidate hashing latency.
 
-		coordinator := req.submissionCoordinator
 		if coordinator == nil {
-			coordinator = c.coordinator
-			if coordinator == nil {
-				sendError(c, req.ID, 20, "block submission pending reconciliation")
-				return nil
-			}
+			sendError(c, req.ID, 20, "block submission pending reconciliation")
+			return nil
 		}
-		durable := coordinator.submitFrozenCandidate(c, jobData, full, en2Bytes, result[:], accountingSnapshot, accountingTotalWork, req.ID)
+		durable := coordinator.submitFrozenCandidateWithShare(c, jobData, full, en2Bytes, result[:], accountingSnapshot, accountingTotalWork, req.ID, discoveryShare)
 		if durable.Disposition == storage.PutDispositionInserted && blocksFound != nil {
 			blocksFound.Inc()
 		}
 		if durable.Err != nil {
+			if coordinator.shareAccounting != nil {
+				jobData.usedNonces.Delete(dupKey)
+			}
 			durable.Decision = storage.SubmitDecisionPending
 			log.Printf("[SUBMIT] durable candidate finalization unavailable hash=%s: %v", blockKey, durable.Err)
 		}

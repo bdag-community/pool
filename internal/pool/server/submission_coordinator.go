@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"asicPool/internal/pool/sharejournal"
 	"asicPool/internal/pool/storage"
 )
 
@@ -34,6 +35,7 @@ type submissionCoordinator struct {
 	legacyOnly       atomic.Bool
 	acceptedEffects  func(FrozenCandidateV1, RPCObservationV1)
 	metricsPublisher *submissionMetricsPublisherV1
+	shareAccounting  *durableShareAccounting
 }
 
 // These hooks are nil in production. They let the owned fault suite inject a
@@ -90,6 +92,10 @@ func (c *submissionCoordinator) SubmitCandidate(client *client, req *stratumRequ
 }
 
 func (c *submissionCoordinator) submitFrozenCandidate(client *client, job *JobData, header []byte, extraNonce2 []byte, sharePowHash []byte, accountingSnapshot map[string]uint64, accountingTotalWork uint64, requestID interface{}) submitCandidateResult {
+	return c.submitFrozenCandidateWithShare(client, job, header, extraNonce2, sharePowHash, accountingSnapshot, accountingTotalWork, requestID, nil)
+}
+
+func (c *submissionCoordinator) submitFrozenCandidateWithShare(client *client, job *JobData, header []byte, extraNonce2 []byte, sharePowHash []byte, accountingSnapshot map[string]uint64, accountingTotalWork uint64, requestID interface{}, discoveryShare *sharejournal.Share) submitCandidateResult {
 	result := submitCandidateResult{Decision: storage.SubmitDecisionPending}
 	if c == nil || c.journal == nil {
 		result.Err = errors.New("durable submission journal is unavailable")
@@ -101,14 +107,25 @@ func (c *submissionCoordinator) submitFrozenCandidate(client *client, job *JobDa
 		return result
 	}
 	result.Candidate = candidate
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
+	// The configured RPC timeout applies to the network request. Candidate and
+	// attempt persistence need their own bounded budget before that request can
+	// begin; otherwise normal database latency can consume the entire RPC limit.
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), blockSubmissionPersistTimeout)
+	defer persistCancel()
 	var view storage.CandidateViewV1
 	var disposition storage.PutDisposition
-	if wide, ok := c.journal.(interface {
+	if c.shareAccounting != nil {
+		if c.shareAccounting.journal == nil {
+			result.Err = errors.New("durable share accounting is unavailable")
+			return result
+		}
+		var discovery storage.UnpricedDiscoveryV1
+		discovery, disposition, err = c.shareAccounting.journal.PutUnpricedDiscoveryV1(persistCtx, candidate, discoveryShare, c.shareAccounting.target, c.shareAccounting.policy, c.poolFeePercent)
+		view = discovery.Candidate
+	} else if wide, ok := c.journal.(interface {
 		DiscoverCandidateV2(context.Context, storage.FrozenCandidateV1, func() (storage.AcceptedAccountingIntentV2, error)) (storage.CandidateViewV1, storage.PutDisposition, error)
 	}); ok {
-		view, disposition, err = wide.DiscoverCandidateV2(ctx, candidate, func() (storage.AcceptedAccountingIntentV2, error) {
+		view, disposition, err = wide.DiscoverCandidateV2(persistCtx, candidate, func() (storage.AcceptedAccountingIntentV2, error) {
 			return buildAcceptedAccountingIntentV2(candidate, job, accountingSnapshot, accountingTotalWork, c.poolFeePercent)
 		})
 	} else {
@@ -127,12 +144,12 @@ func (c *submissionCoordinator) submitFrozenCandidate(client *client, job *JobDa
 	if view.State == storage.SubmissionStateAcceptedFinal || view.State == storage.SubmissionStateRejectedFinal {
 		result.Transition.State = view.State
 		result.Decision = decisionForFinalState(view)
-		if view.State == storage.SubmissionStateAcceptedFinal {
-			result.AccountingErr = c.applyAcceptedAccounting(ctx, candidate.CandidateID)
+		if view.State == storage.SubmissionStateAcceptedFinal && c.shareAccounting == nil {
+			result.AccountingErr = c.applyAcceptedAccounting(persistCtx, candidate.CandidateID)
 		}
 		return result
 	}
-	leased, err := c.journal.ClaimCandidate(ctx, candidate.CandidateID, c.owner, c.lease)
+	leased, err := c.journal.ClaimCandidate(persistCtx, candidate.CandidateID, c.owner, c.lease)
 	if err != nil {
 		result.Err = err
 		return result
@@ -145,12 +162,15 @@ func (c *submissionCoordinator) submitFrozenCandidate(client *client, job *JobDa
 	if c.legacyOnly.Load() && len(leased.Candidate.LastAttemptID) == 0 {
 		method = SubmitMethod(storage.SubmitMethodLegacy)
 	}
-	prepared, err := c.journal.PrepareAttempt(ctx, leased.Lease, method)
+	prepared, err := c.journal.PrepareAttempt(persistCtx, leased.Lease, method)
 	if err != nil {
 		result.Err = err
 		return result
 	}
-	observation, sendErr := sendPreparedAttemptV1(ctx, prepared)
+	persistCancel()
+	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), c.timeout)
+	observation, sendErr := sendPreparedAttemptV1(rpcCtx, prepared)
+	rpcCancel()
 	if sendErr != nil && strictMethodNotFoundObservationV1(observation) {
 		c.legacyOnly.Store(true)
 		result.Decision = storage.SubmitDecisionMethodNotFound
@@ -176,7 +196,9 @@ func (c *submissionCoordinator) submitFrozenCandidate(client *client, job *JobDa
 	recordSubmissionAttemptMetricV1("stratum", string(result.Decision), observation)
 	result.Transition = transition
 	if transition.FirstAccepted {
-		result.AccountingErr = c.applyAcceptedAccounting(completionCtx, candidate.CandidateID)
+		if c.shareAccounting == nil {
+			result.AccountingErr = c.applyAcceptedAccounting(completionCtx, candidate.CandidateID)
+		}
 		c.applyFirstAcceptedEffects(leased.Candidate.Candidate, observation)
 	}
 	_ = requestID

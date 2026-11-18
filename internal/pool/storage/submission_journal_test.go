@@ -183,7 +183,7 @@ func TestPrepareAttemptReplaysLatestPersistedRequestUnderNewLease(t *testing.T) 
 	if _, disposition, err := s.PutCandidate(context.Background(), candidate, storageTestAccountingIntent(candidate)); err != nil || disposition != PutDispositionInserted {
 		t.Fatalf("seed candidate: disposition=%q err=%v", disposition, err)
 	}
-	first, err := s.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{1}, 100*time.Millisecond)
+	first, err := s.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{1}, 5*time.Second)
 	if err != nil || first == nil {
 		t.Fatalf("first lease: %#v %v", first, err)
 	}
@@ -193,11 +193,13 @@ func TestPrepareAttemptReplaysLatestPersistedRequestUnderNewLease(t *testing.T) 
 	}
 	oldBody := append([]byte(nil), orphan.RequestBody...)
 	oldDigest := orphan.RequestSHA256
-	time.Sleep(220 * time.Millisecond)
+	if wait := time.Until(first.Lease.ExpiresAt) + 50*time.Millisecond; wait > 0 {
+		time.Sleep(wait)
+	}
 	if reclaimed, err := s.ReclaimExpiredLeases(context.Background()); err != nil || reclaimed != 1 {
 		t.Fatalf("reclaim = %d err=%v", reclaimed, err)
 	}
-	second, err := s.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{2}, time.Second)
+	second, err := s.ClaimCandidate(context.Background(), candidate.CandidateID, [16]byte{2}, 5*time.Second)
 	if err != nil || second == nil {
 		t.Fatalf("second lease: %#v %v", second, err)
 	}
