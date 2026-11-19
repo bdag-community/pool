@@ -96,7 +96,11 @@ func (s *PostgresStorage) verifyUnpricedWorkTxV1(ctx context.Context, tx pgx.Tx,
 // catalog and conflict invariants. Full audits pass nil to verify every cut.
 func (s *PostgresStorage) verifyUnpricedWorkCandidateTxV1(ctx context.Context, tx pgx.Tx, chainID *big.Int, backendID string, wallet common.Address, candidateID []byte) error {
 	allowHeldDuplicate := s.unpricedSubmissionHold.Load() != nil
-	if err := s.verifyUnpricedStructureWithScopedHoldV1(ctx, tx, allowHeldDuplicate); err != nil {
+	var scope []byte
+	if s.bestEffortAccounting.Load() {
+		scope = candidateID
+	}
+	if err := s.verifyUnpricedStructureScopedV1(ctx, tx, allowHeldDuplicate, scope, false); err != nil {
 		return err
 	}
 	return s.verifyUnpricedRowsTxV1(ctx, tx, chainID, backendID, wallet, candidateID)
@@ -109,6 +113,10 @@ func (s *PostgresStorage) verifyUnpricedStructureTxV1(ctx context.Context, tx pg
 // Only the exact qualified duplicate is exempted; every work cut is still
 // verified and any other conflict continues to fail closed.
 func (s *PostgresStorage) verifyUnpricedStructureWithScopedHoldV1(ctx context.Context, tx pgx.Tx, allowSubmissionHold bool) error {
+	return s.verifyUnpricedStructureScopedV1(ctx, tx, allowSubmissionHold, nil, false)
+}
+
+func (s *PostgresStorage) verifyUnpricedStructureScopedV1(ctx context.Context, tx pgx.Tx, allowSubmissionHold bool, candidateID []byte, ignoreHistorical bool) error {
 	var err error
 	if _, err = tx.Exec(ctx, `SET LOCAL search_path=pg_catalog,public`); err != nil {
 		return err
@@ -121,24 +129,47 @@ func (s *PostgresStorage) verifyUnpricedStructureWithScopedHoldV1(ctx context.Co
 	}
 	var conflicts, orphans, missing, priced int64
 	err = tx.QueryRow(ctx, `SELECT
- (SELECT count(*) FROM pool_share_journal_v1.unpriced_conflicts_v1),
- (SELECT count(*) FROM pool_share_journal_v1.cuts c LEFT JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) WHERE d.candidate_id IS NULL),
- (SELECT count(*) FROM public.block_submission_candidates_v1 c LEFT JOIN public.accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) WHERE i.candidate_id IS NULL AND d.candidate_id IS NULL),
- (SELECT count(*) FROM pool_share_journal_v1.unpriced_discoveries_v1 d LEFT JOIN public.accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN public.accepted_block_accounting_effects_v1 e USING(candidate_id) WHERE i.candidate_id IS NOT NULL OR e.candidate_id IS NOT NULL)`).Scan(&conflicts, &orphans, &missing, &priced)
+ (SELECT count(*) FROM pool_share_journal_v1.unpriced_conflicts_v1 WHERE ($1::bytea IS NULL OR candidate_id=$1)),
+ (SELECT count(*) FROM pool_share_journal_v1.cuts c LEFT JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) WHERE d.candidate_id IS NULL AND ($1::bytea IS NULL OR c.candidate_id=$1)),
+ (SELECT count(*) FROM public.block_submission_candidates_v1 c LEFT JOIN public.accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) WHERE i.candidate_id IS NULL AND d.candidate_id IS NULL AND ($1::bytea IS NULL OR c.candidate_id=$1)),
+ (SELECT count(*) FROM pool_share_journal_v1.unpriced_discoveries_v1 d LEFT JOIN public.accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN public.accepted_block_accounting_effects_v1 e USING(candidate_id) WHERE (i.candidate_id IS NOT NULL OR e.candidate_id IS NOT NULL) AND ($1::bytea IS NULL OR d.candidate_id=$1))`, candidateID).Scan(&conflicts, &orphans, &missing, &priced)
 	if err != nil {
 		return err
+	}
+	if s.bestEffortAccounting.Load() && candidateID != nil && conflicts > 0 {
+		// Independently classify each exact, receipted duplicate. An
+		// unrelated dispute must not prevent preserving a known owner's work.
+		query := `SELECT count(*) FROM pool_share_journal_v1.unpriced_conflicts_v1 uc WHERE uc.candidate_id=$1 AND NOT (` + unpricedSubmissionEvidenceExprSQLV1("uc.conflict_id", true) + `)`
+		if err := tx.QueryRow(ctx, query, candidateID).Scan(&conflicts); err != nil {
+			return err
+		}
+	}
+	if s.bestEffortAccounting.Load() && candidateID != nil {
+		// A submission conflict for this same candidate that has no matching
+		// classified work dispute is still unknown attribution.
+		var other int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM public.block_submission_conflicts_v1 f WHERE f.candidate_id=$1 AND NOT EXISTS(SELECT 1 FROM pool_share_journal_v1.unpriced_conflicts_v1 u WHERE u.conflict_id=f.conflict_id)`, candidateID).Scan(&other); err != nil {
+			return err
+		}
+		conflicts += other
 	}
 	if allowSubmissionHold && conflicts == 1 {
 		if hold := s.unpricedSubmissionHold.Load(); hold != nil {
 			var qualified bool
-			if err := tx.QueryRow(ctx, `SELECT `+unpricedSubmissionHoldSQLV1(1), hold[:]).Scan(&qualified); err != nil {
+			query := `SELECT ` + unpricedSubmissionEvidenceSQLV1(1, s.bestEffortAccounting.Load() && candidateID != nil)
+			args := []any{hold[:]}
+			if candidateID != nil {
+				query += ` AND EXISTS(SELECT 1 FROM public.block_submission_conflicts_v1 WHERE conflict_id=$1 AND candidate_id=$2)`
+				args = append(args, candidateID)
+			}
+			if err := tx.QueryRow(ctx, query, args...).Scan(&qualified); err != nil {
 				return err
 			} else if qualified {
 				conflicts = 0
 			}
 		}
 	}
-	if conflicts != 0 || orphans != 0 || missing != 0 || priced != 0 {
+	if !ignoreHistorical && (conflicts != 0 || orphans != 0 || missing != 0 || priced != 0) {
 		return fmt.Errorf("unpriced verification failed conflicts=%d orphan_cuts=%d missing_work=%d unexpected_pricing=%d", conflicts, orphans, missing, priced)
 	}
 	return nil

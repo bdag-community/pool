@@ -25,7 +25,7 @@ func (s *PostgresStorage) NextMatureRewardExcludingV1(ctx context.Context, maxHe
 		return id, false, errors.New("reward allocation requires a deadline")
 	}
 	var conflict bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`).Scan(&conflict); err != nil || conflict {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`).Scan(&conflict); err != nil || (conflict && !s.bestEffortAccounting.Load()) {
 		return id, false, errors.New("reward observation conflict held")
 	}
 	var raw []byte
@@ -35,7 +35,14 @@ func (s *PostgresStorage) NextMatureRewardExcludingV1(ctx context.Context, maxHe
 	}
 	acceptedSQL, acceptedArgs := s.rewardAcceptedSelectorV1("s", "o.candidate_id", 3)
 	args := append([]any{strconv.FormatUint(maxHeight, 10), skipped}, acceptedArgs...)
-	err := s.pool.QueryRow(ctx, `SELECT o.candidate_id FROM pool_reward_observations_v1.observations o JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.allocations a USING(candidate_id) WHERE `+acceptedSQL+` AND a.candidate_id IS NULL AND o.native_height<=$1::numeric AND o.candidate_id<>ALL($2::bytea[]) ORDER BY o.native_height,o.candidate_id LIMIT 1`, args...).Scan(&raw)
+	operatorJoin, operatorFilter := "", ""
+	conflictFilter := ` AND NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts x WHERE x.candidate_id=o.candidate_id)`
+	if s.bestEffortAccounting.Load() {
+		operatorJoin = ` LEFT JOIN pool_reward_observations_v1.operator_defaults_v1 od ON od.candidate_id=o.candidate_id`
+		operatorFilter = ` AND od.candidate_id IS NULL`
+		conflictFilter = ""
+	}
+	err := s.pool.QueryRow(ctx, `SELECT o.candidate_id FROM pool_reward_observations_v1.observations o JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.allocations a USING(candidate_id)`+operatorJoin+` WHERE `+acceptedSQL+conflictFilter+` AND a.candidate_id IS NULL`+operatorFilter+` AND o.native_height<=$1::numeric AND o.candidate_id<>ALL($2::bytea[]) ORDER BY o.native_height DESC,o.candidate_id LIMIT 1`, args...).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return id, false, nil
 	}

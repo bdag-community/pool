@@ -14,7 +14,7 @@ import (
 // recorded. Check its current native-to-EVM mapping before recovering a
 // reordered reward; the unique database claim alone cannot detect that case.
 func (v RPCMatureRewardVerifierV1) verifyNoReorderedAliasesV1(ctx context.Context, tx pgx.Tx, identity common.Hash) error {
-	rows, err := tx.Query(ctx, `SELECT o.native_block_hash FROM pool_reward_observations_v1.allocations a JOIN pool_reward_observations_v1.observations o USING(candidate_id)`)
+	rows, err := tx.Query(ctx, `SELECT o.native_block_hash FROM pool_reward_observations_v1.allocations a JOIN pool_reward_observations_v1.observations o USING(candidate_id) UNION ALL SELECT o.native_block_hash FROM pool_reward_observations_v1.operator_defaults_v1 d JOIN pool_reward_observations_v1.observations o USING(candidate_id)`)
 	if err != nil {
 		return err
 	}

@@ -17,6 +17,8 @@ import (
 
 const maxWindowRows = 100000
 
+var ErrShareCutMissing = errors.New("accepted-share cut not found")
+
 // The transaction-scoped lock serializes inserts across all cooperating pool
 // processes so sequence order is also commit order.
 const appendLock int64 = 4702976340189971
@@ -224,8 +226,10 @@ func windowTx(ctx context.Context, tx pgx.Tx, cut int64, target uint64) ([]Share
 		return nil, errors.New("invalid transactional share window request")
 	}
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_share_journal_v1.shares WHERE sequence=$1)`, cut).Scan(&exists); err != nil || !exists {
-		return nil, errors.New("accepted-share cut not found")
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_share_journal_v1.shares WHERE sequence=$1)`, cut).Scan(&exists); err != nil {
+		return nil, err
+	} else if !exists {
+		return nil, ErrShareCutMissing
 	}
 	var out []Share
 	remaining, cursor := target, cut

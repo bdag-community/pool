@@ -89,6 +89,11 @@ func (s *PostgresStorage) verifyJobRecoveryAllowanceV1(ctx context.Context) (*jo
 // missing receipt/effect, changed original intent, ANY other conflict, or ANY
 // accounting conflict all keep the gate closed. Values are bind parameters.
 func (s *PostgresStorage) conflictLatchSQLV1(firstParam int) (string, []any) {
+	if s.bestEffortAccounting.Load() {
+		// A disputed candidate remains in its own conflict state; it must not
+		// prevent other independently journaled candidates from being submitted.
+		return `FALSE`, nil
+	}
 	if hold := s.unpricedSubmissionHold.Load(); hold != nil {
 		qualified := unpricedSubmissionHoldSQLV1(firstParam)
 		economic, extra := s.accountingConflictLatchSQLV1(firstParam + 1)

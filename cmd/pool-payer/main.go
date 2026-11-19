@@ -178,11 +178,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 	canonical := storage.RPCMatureRewardVerifierV1{Native: native, EVM: evm, Confirmations: payments.NativePayoutMaturity, RecoveryDirectory: os.Getenv("POOL_REWARD_RECOVERY_DIR")}
-	creditGuard, err := storage.NewRewardCreditGuardV1(pool, "node", canonical)
+	creditGuard, err := storage.NewRewardCreditGuardV1(pool, "node", canonical, os.Getenv("POOL_ACCOUNTING_BEST_EFFORT") != "0")
 	if err != nil {
 		return err
 	}
-	journal, err := payments.NewWalletScopedJournal(base, rewardGuard{creditGuard})
+	journal, err := payments.NewWalletScopedJournal(base, rewardGuard{creditGuard}, os.Getenv("POOL_ACCOUNTING_BEST_EFFORT") != "0")
 	if err != nil {
 		return err
 	}

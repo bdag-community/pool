@@ -59,8 +59,12 @@ func (s *PostgresStorage) verifyOrAllocateObservedRewardV1(ctx context.Context, 
 		return false, err
 	}
 	defer rollbackUnpricedTx(tx)
+	fallbackReason := ""
 	if err = s.verifyUnpricedWorkCandidateTxV1(ctx, tx, chainID, backend, wallet, id[:]); err != nil {
-		return false, err
+		if !s.bestEffortAccounting.Load() || !allowCreate || !operatorAttributionUnavailableV1(err) || ctx.Err() != nil {
+			return false, err
+		}
+		fallbackReason = "conflicting_or_missing_work"
 	}
 	view, err := scanCandidateView(ctx, tx, id)
 	if err != nil || view.Candidate.Height == nil || !view.Candidate.Height.IsInt64() {
@@ -94,14 +98,23 @@ func (s *PostgresStorage) verifyOrAllocateObservedRewardV1(ctx context.Context, 
 		return false, errors.New("reward observation digest differs")
 	}
 	var conflict bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`).Scan(&conflict); err != nil || conflict {
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts WHERE NOT $2::boolean OR candidate_id=$1)`, id[:], s.bestEffortAccounting.Load()).Scan(&conflict); err != nil || (conflict && !s.bestEffortAccounting.Load()) {
 		return false, errors.New("reward observation conflict held")
+	}
+	if fallbackReason != "" {
+		return retainOperatorRewardV1(ctx, tx, view, obs, wallet, digest, verifier, fallbackReason, allowCreate)
 	}
 	var shareID, storedWork []byte
 	var feeRaw, totalRaw, targetRaw, policyRaw string
 	var cut int64
 	err = tx.QueryRow(ctx, `SELECT d.discovery_share_id,d.work_digest,d.fee_float_bits::text,d.total_work::text,p.target_work::text,p.boundary_policy,COALESCE(c.share_sequence,0) FROM pool_share_journal_v1.unpriced_discoveries_v1 d JOIN pool_share_journal_v1.allocation_policies p USING(candidate_id) JOIN pool_share_journal_v1.cuts c USING(candidate_id) WHERE d.candidate_id=$1`, id[:]).Scan(&shareID, &storedWork, &feeRaw, &totalRaw, &targetRaw, &policyRaw, &cut)
-	if err != nil || len(storedWork) != 32 || cut <= 0 {
+	if err != nil || len(storedWork) != 32 || cut < 0 {
+		return false, errors.New("reward work unavailable")
+	}
+	if cut == 0 && len(shareID) == 0 && totalRaw == "0" && s.bestEffortAccounting.Load() {
+		return retainOperatorRewardV1(ctx, tx, view, obs, wallet, digest, verifier, "no_attributable_work", allowCreate)
+	}
+	if cut == 0 {
 		return false, errors.New("reward work unavailable")
 	}
 	feeBits, err := strconv.ParseUint(feeRaw, 10, 64)

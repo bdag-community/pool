@@ -30,14 +30,16 @@ func (s *PostgresStorage) PrepareRewardStartupV1(ctx context.Context, chainID *b
 		return err
 	}
 	defer rollbackUnpricedTx(tx)
-	if err = s.verifyUnpricedStructureWithScopedHoldV1(ctx, tx, true); err != nil {
+	if err = s.verifyUnpricedStructureScopedV1(ctx, tx, true, nil, s.bestEffortAccounting.Load()); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `SET LOCAL search_path=public`); err != nil {
 		return err
 	}
-	if err = s.verifyAcceptedAccountingV2Tx(ctx, tx, nil, true); err != nil {
-		return err
+	if !s.bestEffortAccounting.Load() {
+		if err = s.verifyAcceptedAccountingV2Tx(ctx, tx, nil, true); err != nil {
+			return err
+		}
 	}
 	var pending bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accepted_block_submission_receipts_v1 r JOIN accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN accepted_block_accounting_effects_v1 e USING(candidate_id) WHERE e.candidate_id IS NULL)`).Scan(&pending)
@@ -47,7 +49,7 @@ func (s *PostgresStorage) PrepareRewardStartupV1(ctx context.Context, chainID *b
 	if err = tx.Rollback(ctx); err != nil {
 		return err
 	}
-	if pending {
+	if pending && !s.bestEffortAccounting.Load() {
 		_, err = s.ReconcileAccountingWithUnpricedV1(ctx, chainID, backendID, wallet)
 	}
 	return err

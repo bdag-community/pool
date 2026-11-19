@@ -58,7 +58,7 @@ func (s *PostgresStorage) NextRewardObservationCandidateExcludingV1(ctx context.
 		return nil, errors.New("reward observation requires a deadline")
 	}
 	var conflicts bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`).Scan(&conflicts); err != nil || conflicts {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`).Scan(&conflicts); err != nil || (conflicts && !s.bestEffortAccounting.Load()) {
 		return nil, errors.New("reward observation conflict state unavailable")
 	}
 	var raw []byte
@@ -68,7 +68,7 @@ func (s *PostgresStorage) NextRewardObservationCandidateExcludingV1(ctx context.
 	}
 	acceptedSQL, acceptedArgs := s.rewardAcceptedSelectorV1("s", "r.candidate_id", 2)
 	args := append([]any{skipped}, acceptedArgs...)
-	err := s.pool.QueryRow(ctx, `SELECT r.candidate_id FROM accepted_block_submission_receipts_v1 r JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.observations o USING(candidate_id) WHERE `+acceptedSQL+` AND o.candidate_id IS NULL AND r.candidate_id<>ALL($1::bytea[]) ORDER BY r.accepted_at DESC,r.candidate_id LIMIT 1`, args...).Scan(&raw)
+	err := s.pool.QueryRow(ctx, `SELECT r.candidate_id FROM accepted_block_submission_receipts_v1 r JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.observations o USING(candidate_id) WHERE `+acceptedSQL+` AND NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts x WHERE x.candidate_id=r.candidate_id) AND o.candidate_id IS NULL AND r.candidate_id<>ALL($1::bytea[]) ORDER BY r.accepted_at DESC,r.candidate_id LIMIT 1`, args...).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -135,7 +135,7 @@ func (s *PostgresStorage) RecordRewardObservationV1(ctx context.Context, id [32]
 		return false, err
 	}
 	var ready bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_share_journal_v1.unpriced_discoveries_v1 d JOIN public.accepted_block_submission_receipts_v1 r USING(candidate_id) WHERE d.candidate_id=$1 AND r.block_hash=$2) AND NOT EXISTS(SELECT 1 FROM public.accepted_block_accounting_intents_v1 WHERE candidate_id=$1) AND NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)`, id[:], observation.NativeBlockHash[:]).Scan(&ready)
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_share_journal_v1.unpriced_discoveries_v1 d JOIN public.accepted_block_submission_receipts_v1 r USING(candidate_id) WHERE d.candidate_id=$1 AND r.block_hash=$2) AND NOT EXISTS(SELECT 1 FROM public.accepted_block_accounting_intents_v1 WHERE candidate_id=$1) AND NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts WHERE NOT $3::boolean OR candidate_id=$1)`, id[:], observation.NativeBlockHash[:], s.bestEffortAccounting.Load()).Scan(&ready)
 	if err != nil || !ready {
 		return false, errors.New("unpriced accepted candidate or conflict state unavailable")
 	}

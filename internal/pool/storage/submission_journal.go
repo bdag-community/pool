@@ -222,6 +222,16 @@ func (s *PostgresStorage) VerifySubmissionJournalV1(ctx context.Context, chainID
 	if incompatible != 0 {
 		return fmt.Errorf("submission journal contains %d incompatible candidate identities", incompatible)
 	}
+	if s.bestEffortAccounting.Load() {
+		// A historical accounting dispute is not a reason to stop submitting
+		// independent blocks. An exact known duplicate may still be recovered
+		// for owner allocation, but an unqualified one is never asserted valid.
+		if hold, err := s.verifyUnpricedSubmissionHoldV1(ctx, chainID, backendID); err == nil && hold != nil {
+			s.unpricedSubmissionHold.Store(hold)
+		}
+		verified = true
+		return nil
+	}
 	discovery, err := s.verifyDiscoveryRecoveryAllowanceV1(ctx)
 	if err != nil {
 		return fmt.Errorf("economic conflict unresolved: %w", err)

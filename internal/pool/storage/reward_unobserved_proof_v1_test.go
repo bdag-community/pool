@@ -15,7 +15,7 @@ import (
 
 func TestProvenUnobservedRewardRecording(t *testing.T) {
 	s, ctx, _, candidate := acceptedUnpricedFixture(t)
-	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql", "20261119_operator_default_v1.sql"} {
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(testSourceFile()), "..", "..", "..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)

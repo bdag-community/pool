@@ -81,6 +81,27 @@ func upgradePaymentPipeline(ctx context.Context, conn *pgxpool.Conn) error {
 	return tx.Commit(ctx)
 }
 
+func installOperatorDefaults(ctx context.Context, conn *pgxpool.Conn) error {
+	var exists bool
+	if err := conn.QueryRow(ctx, `SELECT to_regclass('pool_reward_observations_v1.operator_defaults_v1') IS NOT NULL`).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		data, err := migrations.Files.ReadFile("20261119_operator_default_v1.sql")
+		if err != nil {
+			return err
+		}
+		if _, err = conn.Exec(ctx, string(data)); err != nil {
+			return fmt.Errorf("operator default migration: %w", err)
+		}
+	}
+	var columns, triggers int
+	if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema='pool_reward_observations_v1' AND table_name='operator_defaults_v1' AND column_name IN ('candidate_id','wallet','evm_block_hash','evidence_digest','gross_wei','reason','created_at')), (SELECT count(*) FROM pg_trigger WHERE tgrelid='pool_reward_observations_v1.operator_defaults_v1'::regclass AND NOT tgisinternal AND tgname IN ('operator_defaults_immutable','operator_defaults_no_truncate') AND tgenabled='O')`).Scan(&columns, &triggers); err != nil || columns != 7 || triggers != 2 {
+		return errors.New("operator default catalog verification failed")
+	}
+	return nil
+}
+
 func runWithUpgrade(ctx context.Context, url string, allowLegacy bool) error {
 	if url == "" {
 		return errors.New("PG_URL is required")
@@ -149,7 +170,10 @@ func runWithUpgrade(ctx context.Context, url string, allowLegacy bool) error {
 				return fmt.Errorf("reward claim migration: %w", err)
 			}
 		}
-		return verifyRewardClaims(ctx, conn)
+		if err = verifyRewardClaims(ctx, conn); err != nil {
+			return err
+		}
+		return installOperatorDefaults(ctx, conn)
 	}
 	var populated bool
 	if err = conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.blocks) OR EXISTS(SELECT 1 FROM public.credits) OR EXISTS(SELECT 1 FROM public.payouts)`).Scan(&populated); err != nil {
@@ -189,7 +213,7 @@ func runWithUpgrade(ctx context.Context, url string, allowLegacy bool) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	for _, name := range []string{"20261117_durable_share_journal_v1.sql", "20261117_unpriced_discovery_v1.sql", "20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+	for _, name := range []string{"20261117_durable_share_journal_v1.sql", "20261117_unpriced_discovery_v1.sql", "20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql", "20261119_operator_default_v1.sql"} {
 		body, err := sqlBody(name)
 		if err != nil {
 			return err

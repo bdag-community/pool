@@ -383,6 +383,7 @@ func Run(cfg Config) error {
 	// listener or any submit-capable client can exist.
 	var poolStorage storage.Storage
 	pg := storage.NewPostgresStorage(cfg.PGURL)
+	pg.SetBestEffortAccounting(os.Getenv("POOL_ACCOUNTING_BEST_EFFORT") != "0")
 	if err := pg.Connect(context.Background()); err != nil {
 		log.Printf("❌ Database Connection Failed: %v", err)
 		return err

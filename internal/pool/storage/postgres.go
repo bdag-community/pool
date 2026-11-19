@@ -65,6 +65,15 @@ type PostgresStorage struct {
 	jobRecovery            atomic.Pointer[jobRecoveryAllowanceV1]
 	discoveryRecovery      atomic.Pointer[discoveryRecoveryAllowanceV1]
 	unpricedSubmissionHold atomic.Pointer[[16]byte]
+	bestEffortAccounting   atomic.Bool
+}
+
+// SetBestEffortAccounting isolates disputed accounting from unrelated mining
+// and rewards. It does not change native/EVM, wallet, or signature checks.
+func (s *PostgresStorage) SetBestEffortAccounting(enabled bool) {
+	if s != nil {
+		s.bestEffortAccounting.Store(enabled)
+	}
 }
 
 func NewPostgresStorage(url string) *PostgresStorage {

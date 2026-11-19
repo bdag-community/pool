@@ -18,15 +18,20 @@ type ScopedCreditGuard interface {
 }
 
 type walletScopedJournal struct {
-	base  *PostgresJournal
-	guard ScopedCreditGuard
+	base       *PostgresJournal
+	guard      ScopedCreditGuard
+	bestEffort bool
 }
 
-func NewWalletScopedJournal(base *PostgresJournal, guard ScopedCreditGuard) (ReviewedJournal, error) {
-	if base == nil || guard == nil {
+func NewWalletScopedJournal(base *PostgresJournal, guard ScopedCreditGuard, bestEffort ...bool) (ReviewedJournal, error) {
+	if base == nil || guard == nil || len(bestEffort) > 1 {
 		return nil, errors.New("wallet-scoped journal needs a canonical credit guard")
 	}
-	return &walletScopedJournal{base: base, guard: guard}, nil
+	journal := &walletScopedJournal{base: base, guard: guard}
+	if len(bestEffort) == 1 {
+		journal.bestEffort = bestEffort[0]
+	}
+	return journal, nil
 }
 
 func (s *walletScopedJournal) Verify(ctx context.Context) error {
@@ -46,13 +51,14 @@ func (s *walletScopedJournal) Acquire(ctx context.Context, wallet WalletID) (Fen
 		_ = base.Close(ctx)
 		return nil, errors.New("payment fence type unavailable")
 	}
-	return &walletScopedFence{Fence: base, raw: raw, guard: s.guard}, nil
+	return &walletScopedFence{Fence: base, raw: raw, guard: s.guard, bestEffort: s.bestEffort}, nil
 }
 
 type walletScopedFence struct {
 	Fence
-	raw   *postgresFence
-	guard ScopedCreditGuard
+	raw        *postgresFence
+	guard      ScopedCreditGuard
+	bestEffort bool
 }
 
 func (f *walletScopedFence) verify(ctx context.Context, credit Credit) error {
@@ -63,7 +69,7 @@ func (f *walletScopedFence) verify(ctx context.Context, credit Credit) error {
 		return err
 	}
 	var match bool
-	err := f.raw.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.credit_bindings x JOIN pool_reward_observations_v1.allocations a USING(candidate_id) JOIN pool_reward_observations_v1.observations o USING(candidate_id) JOIN public.credits c ON c.id=x.credit_id WHERE x.credit_id=$1 AND x.wallet=$2 AND a.wallet=$2 AND o.wallet=$2 AND x.miner_address=$3 AND x.amount_wei=$4::numeric AND c.miner_address=x.miner_address AND c.amount=x.amount_wei AND c.block_hash=$5 AND c.block_hash=encode(o.native_block_hash,'hex') AND NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts))`, credit.ID, f.raw.wallet.Sender[:], credit.Recipient.Hex(), credit.Amount.String(), credit.BlockHash).Scan(&match)
+	err := f.raw.conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pool_reward_observations_v1.credit_bindings x JOIN pool_reward_observations_v1.allocations a USING(candidate_id) JOIN pool_reward_observations_v1.observations o USING(candidate_id) JOIN public.credits c ON c.id=x.credit_id WHERE x.credit_id=$1 AND x.wallet=$2 AND a.wallet=$2 AND o.wallet=$2 AND x.miner_address=$3 AND x.amount_wei=$4::numeric AND c.miner_address=x.miner_address AND c.amount=x.amount_wei AND c.block_hash=$5 AND c.block_hash=encode(o.native_block_hash,'hex') AND ($6::boolean OR NOT EXISTS(SELECT 1 FROM pool_reward_observations_v1.conflicts)))`, credit.ID, f.raw.wallet.Sender[:], credit.Recipient.Hex(), credit.Amount.String(), credit.BlockHash, f.bestEffort).Scan(&match)
 	if err != nil || !match {
 		return errors.New("credit does not belong to the reward wallet")
 	}

@@ -109,7 +109,7 @@ func TestSyntheticRewardToWalletScopedPayout(t *testing.T) {
 	if _, err = s.CompleteAttempt(ctx, leased.Lease, prepared.AttemptID, acceptedObservation(candidate), SubmitDecisionAcceptedFinal); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql", "20261119_operator_default_v1.sql"} {
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(testSourceFile()), "..", "..", "..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)

@@ -162,7 +162,7 @@ func TestUnpricedSubmissionHoldPreservesAccountingGate(t *testing.T) {
 		t.Fatalf("qualified original work did not verify: %v", err)
 	}
 	_ = verifyTx.Rollback(ctx)
-	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql", "20261119_operator_default_v1.sql"} {
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(testSourceFile()), "..", "..", "..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)
@@ -251,5 +251,87 @@ func TestUnpricedSubmissionHoldRejectsUnreceiptedCandidate(t *testing.T) {
 	t.Setenv(unpricedSubmissionHoldEnvV1, hex.EncodeToString(conflict))
 	if err := s.VerifySubmissionJournalV1(ctx, big.NewInt(1404), "node"); err == nil {
 		t.Fatal("unreceipted attempt must not qualify")
+	}
+}
+
+func TestBestEffortAccountingIsolatesUnrelatedConflict(t *testing.T) {
+	s, ctx := unpricedFixture(t)
+	conflicted := storageTestCandidate()
+	share := unpricedShare(conflicted)
+	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, conflicted, share, 7, sharejournal.WholeShare, 0); err != nil {
+		t.Fatal(err)
+	}
+	bad := *share
+	bad.Miner = "0x3333333333333333333333333333333333333333"
+	if _, disposition, err := s.PutUnpricedDiscoveryV1(ctx, conflicted, &bad, 7, sharejournal.WholeShare, 0); err == nil || disposition != PutDispositionConflict {
+		t.Fatal("conflict fixture absent")
+	}
+	if err := s.VerifySubmissionJournalV1(ctx, big.NewInt(1404), "node"); err == nil {
+		t.Fatal("strict mode did not block")
+	}
+	s.SetBestEffortAccounting(true)
+	if err := s.VerifySubmissionJournalV1(ctx, big.NewInt(1404), "node"); err != nil {
+		t.Fatalf("best effort startup: %v", err)
+	}
+	other := secondUnpricedCandidate(t)
+	other.SharePowHash[0]++
+	var err error
+	other.FrozenPayload, err = encodeFrozenCandidateJournalV1(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.FrozenDigest = sha256.Sum256(other.FrozenPayload)
+	if _, disposition, err := s.PutUnpricedDiscoveryV1(ctx, other, unpricedShare(other), 7, sharejournal.WholeShare, 0); err != nil || disposition != PutDispositionInserted {
+		t.Fatalf("unrelated submission blocked: %s %v", disposition, err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	wallet := common.BytesToAddress(other.HeaderBytes[148:168])
+	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, tx, big.NewInt(1404), "node", wallet, other.CandidateID[:]); err != nil {
+		t.Fatalf("unrelated work blocked: %v", err)
+	}
+	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, tx, big.NewInt(1404), "node", wallet, conflicted.CandidateID[:]); err == nil {
+		t.Fatal("conflicted work was accepted as known")
+	}
+}
+
+func TestBestEffortQualifiedHoldCannotMaskAnotherCandidateConflict(t *testing.T) {
+	s, ctx := unpricedFixture(t)
+	installUnpricedHoldFixture(t, s, ctx)
+	var known []byte
+	if err := s.pool.QueryRow(ctx, `SELECT candidate_id FROM block_submission_conflicts_v1 WHERE conflict_id=decode($1,'hex')`, os.Getenv(unpricedSubmissionHoldEnvV1)).Scan(&known); err != nil {
+		t.Fatal(err)
+	}
+	other := storageTestCandidate()
+	share := unpricedShare(other)
+	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, other, share, 7, sharejournal.WholeShare, 0); err != nil {
+		t.Fatal(err)
+	}
+	changed := *share
+	changed.Miner = "0x3333333333333333333333333333333333333333"
+	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, other, &changed, 7, sharejournal.WholeShare, 0); err == nil {
+		t.Fatal("other conflict missing")
+	}
+	s.SetBestEffortAccounting(true)
+	if err := s.VerifySubmissionJournalV1(ctx, big.NewInt(1404), "node"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.UnpricedSubmissionHoldActive() {
+		t.Fatal("known owner recovery not retained")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	wallet := common.BytesToAddress(other.HeaderBytes[148:168])
+	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, tx, big.NewInt(1404), "node", wallet, known); err != nil {
+		t.Fatalf("known owner work rejected: %v", err)
+	}
+	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, tx, big.NewInt(1404), "node", wallet, other.CandidateID[:]); err == nil {
+		t.Fatal("other candidate conflict was masked")
 	}
 }

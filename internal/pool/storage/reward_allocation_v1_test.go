@@ -62,7 +62,7 @@ func TestRewardClaimMigrationBackfillsAllocations(t *testing.T) {
 
 func TestPostgresRewardAllocationCreatesScopedCreditsOnce(t *testing.T) {
 	s, ctx, _, candidate := acceptedUnpricedFixture(t)
-	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql", "20261119_operator_default_v1.sql"} {
 		path := filepath.Join(filepath.Dir(testSourceFile()), "..", "..", "..", "migrations", name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -80,6 +80,12 @@ func TestPostgresRewardAllocationCreatesScopedCreditsOnce(t *testing.T) {
 	// An unrelated, proven duplicate remains held without blocking this
 	// candidate's original allocation or the wallet-scoped payout guard.
 	installUnpricedHoldFixture(t, s, ctx)
+	s.SetBestEffortAccounting(true)
+	changedObservation := observation
+	changedObservation.OtherFeesWei = "6"
+	if _, err := s.RecordRewardObservationV1(ctx, candidate.CandidateID, wallet, changedObservation); err == nil {
+		t.Fatal("changed observation did not preserve a conflict")
+	}
 	if _, found, err := s.NextMatureRewardV1(ctx, candidate.Height.Uint64()-1); err != nil || found {
 		t.Fatalf("immature discovery selected: %t %v", found, err)
 	}
@@ -142,11 +148,11 @@ func TestPostgresRewardAllocationCreatesScopedCreditsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard, err := NewRewardCreditGuardV1(s.pool, candidate.BackendID, testMatureRewardVerifier{true})
+	guard, err := NewRewardCreditGuardV1(s.pool, candidate.BackendID, testMatureRewardVerifier{true}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal, err := payments.NewWalletScopedJournal(baseJournal, testScopedRewardGuard{guard})
+	journal, err := payments.NewWalletScopedJournal(baseJournal, testScopedRewardGuard{guard}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +160,7 @@ func TestPostgresRewardAllocationCreatesScopedCreditsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer fence.Close(context.Background())
 	credit, err := fence.NextCredit(ctx, candidate.Height.Uint64())
 	if err != nil || credit == nil || credit.Amount.String() != "705" || credit.Recipient != common.HexToAddress("0x2222222222222222222222222222222222222222") {
 		t.Fatalf("payer selected wrong credit: %+v %v", credit, err)

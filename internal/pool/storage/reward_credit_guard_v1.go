@@ -12,28 +12,33 @@ import (
 )
 
 type RewardCreditGuardV1 struct {
-	pool     *pgxpool.Pool
-	backend  string
-	verifier MatureRewardVerifierV1
-	hold     *[16]byte
+	pool       *pgxpool.Pool
+	backend    string
+	verifier   MatureRewardVerifierV1
+	hold       *[16]byte
+	bestEffort bool
 }
 
-func NewRewardCreditGuardV1(pool *pgxpool.Pool, backend string, verifier MatureRewardVerifierV1) (*RewardCreditGuardV1, error) {
-	if pool == nil || verifier == nil || validateJournalIdentity(big.NewInt(1404), backend) != nil {
+func NewRewardCreditGuardV1(pool *pgxpool.Pool, backend string, verifier MatureRewardVerifierV1, bestEffort ...bool) (*RewardCreditGuardV1, error) {
+	if pool == nil || verifier == nil || len(bestEffort) > 1 || validateJournalIdentity(big.NewInt(1404), backend) != nil {
 		return nil, errors.New("reward credit guard is incomplete")
 	}
 	guard := &RewardCreditGuardV1{pool: pool, backend: backend, verifier: verifier}
-	if os.Getenv(unpricedSubmissionHoldEnvV1) != "" {
+	if len(bestEffort) == 1 {
+		guard.bestEffort = bestEffort[0]
+	}
+	if os.Getenv(unpricedSubmissionHoldEnvV1) != "" || guard.bestEffort {
 		// The payer independently qualifies the exact exception. Every credit
 		// is still checked against its own immutable work and both chains.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		borrowed := &PostgresStorage{pool: pool}
+		borrowed.SetBestEffortAccounting(guard.bestEffort)
 		if err := borrowed.VerifySubmissionJournalV1(ctx, big.NewInt(1404), backend); err != nil {
 			return nil, errors.New("reward credit hold verification failed")
 		}
 		guard.hold = borrowed.unpricedSubmissionHold.Load()
-		if guard.hold == nil {
+		if guard.hold == nil && !guard.bestEffort {
 			return nil, errors.New("reward credit hold is not qualified")
 		}
 	}
@@ -54,6 +59,7 @@ func (g *RewardCreditGuardV1) Verify(ctx context.Context, creditID int64, wallet
 	copy(id[:], raw)
 	borrowed := &PostgresStorage{pool: g.pool}
 	borrowed.unpricedSubmissionHold.Store(g.hold)
+	borrowed.SetBestEffortAccounting(g.bestEffort)
 	_, err := borrowed.verifyOrAllocateObservedRewardV1(ctx, id, big.NewInt(1404), g.backend, wallet, g.verifier, false)
 	return err
 }
