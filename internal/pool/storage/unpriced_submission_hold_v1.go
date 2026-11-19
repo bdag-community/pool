@@ -8,8 +8,9 @@ import (
 	"os"
 )
 
-// This opt-in is submission-only. It never resolves the immutable conflict,
-// changes its work cut, or opens the independent reward and payment gates.
+// This opt-in never resolves the immutable conflict or changes its work cut.
+// The disputed candidate remains held; unrelated rewards retain their own
+// independent work, chain, maturity, and payment checks.
 const unpricedSubmissionHoldEnvV1 = "POOL_UNPRICED_SUBMISSION_HOLD_CONFLICT_ID"
 
 // unpricedSubmissionHoldSQLV1 rechecks the complete evidence in the same SQL
@@ -75,8 +76,7 @@ func (s *PostgresStorage) verifyUnpricedSubmissionHoldV1(ctx context.Context, ch
 	return &hold, nil
 }
 
-// UnpricedSubmissionHoldActive identifies a submission-only operating state.
-// Reward allocation and payout verification remain independently fail-closed.
+// UnpricedSubmissionHoldActive identifies the explicitly qualified hold.
 func (s *PostgresStorage) UnpricedSubmissionHoldActive() bool {
 	return s != nil && s.unpricedSubmissionHold.Load() != nil
 }

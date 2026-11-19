@@ -77,6 +77,9 @@ func TestPostgresRewardAllocationCreatesScopedCreditsOnce(t *testing.T) {
 	if _, err := s.RecordRewardObservationV1(ctx, candidate.CandidateID, wallet, observation); err != nil {
 		t.Fatal(err)
 	}
+	// An unrelated, proven duplicate remains held without blocking this
+	// candidate's original allocation or the wallet-scoped payout guard.
+	installUnpricedHoldFixture(t, s, ctx)
 	if _, found, err := s.NextMatureRewardV1(ctx, candidate.Height.Uint64()-1); err != nil || found {
 		t.Fatalf("immature discovery selected: %t %v", found, err)
 	}
