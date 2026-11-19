@@ -203,11 +203,13 @@ func (s *PostgresStorage) VerifySubmissionJournalV1(ctx context.Context, chainID
 	}
 	s.jobRecovery.Store(nil)
 	s.discoveryRecovery.Store(nil)
+	s.unpricedSubmissionHold.Store(nil)
 	verified := false
 	defer func() {
 		if !verified {
 			s.jobRecovery.Store(nil)
 			s.discoveryRecovery.Store(nil)
+			s.unpricedSubmissionHold.Store(nil)
 		}
 	}()
 	if err := verifyJournalCatalogV1(ctx, s.pool); err != nil {
@@ -232,6 +234,13 @@ func (s *PostgresStorage) VerifySubmissionJournalV1(ctx context.Context, chainID
 	if conflicts != 0 {
 		if conflicts != 1 {
 			return fmt.Errorf("submission conflict latch contains %d rows", conflicts)
+		}
+		if hold, err := s.verifyUnpricedSubmissionHoldV1(ctx, chainID, backendID); err != nil {
+			return fmt.Errorf("unpriced submission hold verification failed: %w", err)
+		} else if hold != nil {
+			s.unpricedSubmissionHold.Store(hold)
+			verified = true
+			return nil
 		}
 		allowance, err := s.verifyJobRecoveryAllowanceV1(ctx)
 		if err != nil {

@@ -414,6 +414,9 @@ func Run(cfg Config) error {
 	if err := startupAccounting(); err != nil {
 		return fmt.Errorf("accepted accounting readiness failed: %w", err)
 	}
+	if pg.UnpricedSubmissionHoldActive() {
+		log.Print("WARNING: exact unpriced duplicate permits submissions only; reward allocation and payouts remain held")
+	}
 	if _, err := journal.ReclaimExpiredLeases(context.Background()); err != nil {
 		return fmt.Errorf("durable submission lease reclamation failed: %w", err)
 	}

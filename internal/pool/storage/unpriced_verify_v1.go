@@ -102,6 +102,12 @@ func (s *PostgresStorage) verifyUnpricedWorkCandidateTxV1(ctx context.Context, t
 }
 
 func (s *PostgresStorage) verifyUnpricedStructureTxV1(ctx context.Context, tx pgx.Tx) error {
+	return s.verifyUnpricedStructureForStartupV1(ctx, tx, false)
+}
+
+// A scoped submission hold permits startup only; allocation and payouts call
+// the strict verifier above and continue to fail closed on every conflict.
+func (s *PostgresStorage) verifyUnpricedStructureForStartupV1(ctx context.Context, tx pgx.Tx, allowSubmissionHold bool) error {
 	var err error
 	if _, err = tx.Exec(ctx, `SET LOCAL search_path=pg_catalog,public`); err != nil {
 		return err
@@ -120,6 +126,16 @@ func (s *PostgresStorage) verifyUnpricedStructureTxV1(ctx context.Context, tx pg
  (SELECT count(*) FROM pool_share_journal_v1.unpriced_discoveries_v1 d LEFT JOIN public.accepted_block_accounting_intents_v1 i USING(candidate_id) LEFT JOIN public.accepted_block_accounting_effects_v1 e USING(candidate_id) WHERE i.candidate_id IS NOT NULL OR e.candidate_id IS NOT NULL)`).Scan(&conflicts, &orphans, &missing, &priced)
 	if err != nil {
 		return err
+	}
+	if allowSubmissionHold && conflicts == 1 {
+		if hold := s.unpricedSubmissionHold.Load(); hold != nil {
+			var qualified bool
+			if err := tx.QueryRow(ctx, `SELECT `+unpricedSubmissionHoldSQLV1(1), hold[:]).Scan(&qualified); err != nil {
+				return err
+			} else if qualified {
+				conflicts = 0
+			}
+		}
 	}
 	if conflicts != 0 || orphans != 0 || missing != 0 || priced != 0 {
 		return fmt.Errorf("unpriced verification failed conflicts=%d orphan_cuts=%d missing_work=%d unexpected_pricing=%d", conflicts, orphans, missing, priced)

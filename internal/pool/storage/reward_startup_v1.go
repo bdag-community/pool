@@ -30,7 +30,7 @@ func (s *PostgresStorage) PrepareRewardStartupV1(ctx context.Context, chainID *b
 		return err
 	}
 	defer rollbackUnpricedTx(tx)
-	if err = s.verifyUnpricedStructureTxV1(ctx, tx); err != nil {
+	if err = s.verifyUnpricedStructureForStartupV1(ctx, tx, true); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `SET LOCAL search_path=public`); err != nil {

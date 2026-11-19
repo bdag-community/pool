@@ -124,29 +124,35 @@ func TestPostgresUnpricedDiscoveryAtomicAndReplay(t *testing.T) {
 	}
 }
 
-func TestPostgresUnpricedDiscoveryChangedShareLatches(t *testing.T) {
+func TestPostgresUnpricedDiscoveryChangedWorkRejectsWithoutLatching(t *testing.T) {
 	s, ctx := unpricedFixture(t)
 	candidate := storageTestCandidate()
 	share := unpricedShare(candidate)
-	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, candidate, share, 7, sharejournal.WholeShare, 0); err != nil {
+	original, _, err := s.PutUnpricedDiscoveryV1(ctx, candidate, share, 7, sharejournal.WholeShare, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
 	changed := *share
 	changed.Work++
-	if _, disposition, err := s.PutUnpricedDiscoveryV1(ctx, candidate, &changed, 7, sharejournal.WholeShare, 0); err == nil || disposition != PutDispositionConflict {
-		t.Fatal("changed share accepted")
+	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, candidate, &changed, 7, sharejournal.WholeShare, 0); err == nil {
+		t.Fatal("changed work retry must be rejected")
 	}
 	var conflictCount int
 	var state string
+	if err := s.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM block_submission_conflicts_v1), state FROM block_submission_state_v1 WHERE candidate_id=$1`, candidate.CandidateID[:]).Scan(&conflictCount, &state); err != nil || conflictCount != 0 || state != SubmissionStatePending {
+		t.Fatalf("changed work altered submission state: count=%d state=%s err=%v", conflictCount, state, err)
+	}
+	retry, disposition, err := s.PutUnpricedDiscoveryV1(ctx, candidate, share, 7, sharejournal.WholeShare, 0)
+	if err != nil || disposition != PutDispositionExisting || retry.WorkDigest != original.WorkDigest || retry.Work.Sequence != original.Work.Sequence {
+		t.Fatalf("original discovery could not be retried unchanged: %s %v", disposition, err)
+	}
+	changed = *share
+	changed.Miner = "0x3333333333333333333333333333333333333333"
+	if _, disposition, err := s.PutUnpricedDiscoveryV1(ctx, candidate, &changed, 7, sharejournal.WholeShare, 0); err == nil || disposition != PutDispositionConflict {
+		t.Fatal("changed miner must still latch an integrity conflict")
+	}
 	if err := s.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM block_submission_conflicts_v1), state FROM block_submission_state_v1 WHERE candidate_id=$1`, candidate.CandidateID[:]).Scan(&conflictCount, &state); err != nil || conflictCount != 1 || state != SubmissionStateConflict {
-		t.Fatalf("changed share did not latch: count=%d state=%s err=%v", conflictCount, state, err)
-	}
-	var incomingWork, reason string
-	if err := s.pool.QueryRow(ctx, `SELECT incoming_share_work::text,reason FROM pool_share_journal_v1.unpriced_conflicts_v1 WHERE candidate_id=$1`, candidate.CandidateID[:]).Scan(&incomingWork, &reason); err != nil || incomingWork != "7" || reason != "discovery_share" {
-		t.Fatalf("changed share evidence missing: work=%s reason=%s err=%v", incomingWork, reason, err)
-	}
-	if _, _, err := s.PutUnpricedDiscoveryV1(ctx, candidate, share, 7, sharejournal.WholeShare, 0); err == nil {
-		t.Fatal("latched conflict allowed a later retry")
+		t.Fatalf("changed miner did not latch: count=%d state=%s err=%v", conflictCount, state, err)
 	}
 }
 

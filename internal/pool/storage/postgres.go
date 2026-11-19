@@ -60,10 +60,11 @@ type Credit struct {
 
 // PostgresStorage implements Storage using pgx
 type PostgresStorage struct {
-	dbURL             string
-	pool              *pgxpool.Pool
-	jobRecovery       atomic.Pointer[jobRecoveryAllowanceV1]
-	discoveryRecovery atomic.Pointer[discoveryRecoveryAllowanceV1]
+	dbURL                  string
+	pool                   *pgxpool.Pool
+	jobRecovery            atomic.Pointer[jobRecoveryAllowanceV1]
+	discoveryRecovery      atomic.Pointer[discoveryRecoveryAllowanceV1]
+	unpricedSubmissionHold atomic.Pointer[[16]byte]
 }
 
 func NewPostgresStorage(url string) *PostgresStorage {
@@ -75,6 +76,7 @@ func NewPostgresStorage(url string) *PostgresStorage {
 func (s *PostgresStorage) Connect(ctx context.Context) error {
 	s.jobRecovery.Store(nil)
 	s.discoveryRecovery.Store(nil)
+	s.unpricedSubmissionHold.Store(nil)
 	var err error
 	s.pool, err = pgxpool.New(ctx, s.dbURL)
 	if err != nil {

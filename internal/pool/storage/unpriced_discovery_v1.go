@@ -153,8 +153,14 @@ func (s *PostgresStorage) PutUnpricedDiscoveryV1(ctx context.Context, candidate 
 			return recordUnpricedConflict(ctx, tx, view, candidate, "discovery_policy", digest, share, target, policy, feeBits)
 		}
 		if share != nil {
-			if !common.IsHexAddress(share.Miner) || share.Sequence != 0 || share.Work == 0 || storedMiner == nil || storedWork == nil || common.HexToAddress(share.Miner) == (common.Address{}) || common.HexToAddress(share.Miner).Hex() != *storedMiner || strconv.FormatUint(share.Work, 10) != *storedWork {
+			if !common.IsHexAddress(share.Miner) || share.Sequence != 0 || share.Work == 0 || storedMiner == nil || storedWork == nil || common.HexToAddress(share.Miner) == (common.Address{}) || common.HexToAddress(share.Miner).Hex() != *storedMiner {
 				return recordUnpricedConflict(ctx, tx, view, candidate, "discovery_share", digest, share, target, policy, feeBits)
+			}
+			if strconv.FormatUint(share.Work, 10) != *storedWork {
+				// The same proof can be resubmitted after a difficulty change.
+				// Reject the retry without changing its original work, cut, or
+				// submission state; an unrelated block must not be blocked.
+				return empty, "", errors.New("duplicate discovery has different assigned work")
 			}
 		}
 		// The stored share identity and work were checked above. Reuse the
