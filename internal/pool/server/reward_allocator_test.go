@@ -71,3 +71,34 @@ func TestAllocatorSkipsOnlyTemporarilyStaleEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestBestEffortAllocatorDoesNotLetOneFailureStarveOthers(t *testing.T) {
+	first, second := [32]byte{1}, [32]byte{2}
+	problem := errors.New("reward work unavailable")
+	store := &allocatorTestStore{ids: [][32]byte{first, second}, fault: map[[32]byte]error{first: problem}}
+	a := &rewardAllocator{store: store, gate: allocatorTestGate{}, verifier: allocatorTestVerifier{}, wallet: common.HexToAddress("0x1234"), chainID: big.NewInt(1404), backend: "node", bestEffort: true}
+	if _, err := a.step(context.Background()); !errors.Is(err, problem) {
+		t.Fatalf("failed reward: %v", err)
+	}
+	if created, err := a.step(context.Background()); err != nil || !created || store.attempts[len(store.attempts)-1] != second {
+		t.Fatalf("other reward was starved: %t %v", created, err)
+	}
+	a.held[first] = time.Now().Add(-time.Second)
+	if _, err := a.step(context.Background()); !errors.Is(err, problem) || store.attempts[len(store.attempts)-1] != first {
+		t.Fatalf("failed reward was not retried: %v", err)
+	}
+}
+
+func TestBestEffortAllocatorDoesNotHoldOnCanceledContext(t *testing.T) {
+	first := [32]byte{1}
+	store := &allocatorTestStore{ids: [][32]byte{first}, fault: map[[32]byte]error{first: context.Canceled}}
+	a := &rewardAllocator{store: store, gate: allocatorTestGate{}, verifier: allocatorTestVerifier{}, wallet: common.HexToAddress("0x1234"), chainID: big.NewInt(1404), backend: "node", bestEffort: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.step(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled allocation: %v", err)
+	}
+	if len(a.held) != 0 {
+		t.Fatal("cancellation delayed the reward")
+	}
+}

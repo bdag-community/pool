@@ -90,7 +90,7 @@ func newRewardRuntime(cfg Config, pg *storage.PostgresStorage, chainID *big.Int,
 	return &rewardRuntime{store: pg, chainID: new(big.Int).Set(chainID), backend: backend, wallet: wallet,
 		accounting: &durableShareAccounting{journal: pg, target: targetWork, policy: sharejournal.PartialShare},
 		collector:  &rewardEvidenceCollector{node: ipc, store: pg, wallet: wallet},
-		allocator:  &rewardAllocator{store: pg, gate: gate, verifier: verifier, wallet: wallet, chainID: new(big.Int).Set(chainID), backend: backend},
+		allocator:  &rewardAllocator{store: pg, gate: gate, verifier: verifier, wallet: wallet, chainID: new(big.Int).Set(chainID), backend: backend, bestEffort: os.Getenv("POOL_ACCOUNTING_BEST_EFFORT") != "0"},
 		ipc:        ipc, native: native, evm: evm, ctx: life, cancel: stop}, nil
 }
 

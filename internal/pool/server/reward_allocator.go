@@ -21,13 +21,14 @@ type rewardMaturityGate interface {
 }
 
 type rewardAllocator struct {
-	store    rewardAllocationStore
-	gate     rewardMaturityGate
-	verifier storage.MatureRewardVerifierV1
-	wallet   common.Address
-	chainID  *big.Int
-	backend  string
-	held     map[[32]byte]time.Time
+	store      rewardAllocationStore
+	gate       rewardMaturityGate
+	verifier   storage.MatureRewardVerifierV1
+	wallet     common.Address
+	chainID    *big.Int
+	backend    string
+	held       map[[32]byte]time.Time
+	bestEffort bool
 }
 
 func (a *rewardAllocator) step(ctx context.Context) (bool, error) {
@@ -52,11 +53,15 @@ func (a *rewardAllocator) step(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	created, err := a.store.AllocateObservedRewardV1(ctx, id, a.chainID, a.backend, a.wallet, a.verifier)
-	if errors.Is(err, storage.ErrRewardEvidenceStale) {
+	if err != nil && ctx.Err() == nil && (errors.Is(err, storage.ErrRewardEvidenceStale) || a.bestEffort) {
 		if a.held == nil {
 			a.held = make(map[[32]byte]time.Time)
 		}
-		a.held[id] = now.Add(5 * time.Minute)
+		delay := 30 * time.Second
+		if errors.Is(err, storage.ErrRewardEvidenceStale) {
+			delay = 5 * time.Minute
+		}
+		a.held[id] = now.Add(delay)
 	}
 	return created, err
 }
