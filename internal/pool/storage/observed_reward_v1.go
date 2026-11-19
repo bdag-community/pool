@@ -66,7 +66,9 @@ func (s *PostgresStorage) NextRewardObservationCandidateExcludingV1(ctx context.
 	for i := range excluded {
 		skipped = append(skipped, excluded[i][:])
 	}
-	err := s.pool.QueryRow(ctx, `SELECT r.candidate_id FROM accepted_block_submission_receipts_v1 r JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.observations o USING(candidate_id) WHERE s.state='accepted_final' AND o.candidate_id IS NULL AND r.candidate_id<>ALL($1::bytea[]) ORDER BY r.accepted_at DESC,r.candidate_id LIMIT 1`, skipped).Scan(&raw)
+	acceptedSQL, acceptedArgs := s.rewardAcceptedSelectorV1("s", "r.candidate_id", 2)
+	args := append([]any{skipped}, acceptedArgs...)
+	err := s.pool.QueryRow(ctx, `SELECT r.candidate_id FROM accepted_block_submission_receipts_v1 r JOIN pool_share_journal_v1.unpriced_discoveries_v1 d USING(candidate_id) JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.observations o USING(candidate_id) WHERE `+acceptedSQL+` AND o.candidate_id IS NULL AND r.candidate_id<>ALL($1::bytea[]) ORDER BY r.accepted_at DESC,r.candidate_id LIMIT 1`, args...).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -76,7 +78,10 @@ func (s *PostgresStorage) NextRewardObservationCandidateExcludingV1(ctx context.
 	var id [32]byte
 	copy(id[:], raw)
 	view, err := scanCandidateView(ctx, s.pool, id)
-	if err != nil || view.State != SubmissionStateAcceptedFinal {
+	if err != nil {
+		return nil, errors.New("unobserved candidate changed")
+	}
+	if accepted, err := s.rewardCandidateAcceptedV1(ctx, s.pool, view); err != nil || !accepted {
 		return nil, errors.New("unobserved candidate changed")
 	}
 	return &view.Candidate, nil
@@ -123,7 +128,7 @@ func (s *PostgresStorage) RecordRewardObservationV1(ctx context.Context, id [32]
 	if err != nil {
 		return false, err
 	}
-	if view.State != SubmissionStateAcceptedFinal {
+	if accepted, err := s.rewardCandidateAcceptedV1(ctx, tx, view); err != nil || !accepted {
 		return false, errors.New("reward observation candidate is not accepted")
 	}
 	if err = validateRewardObservationV1(view.Candidate, wallet, observation); err != nil {

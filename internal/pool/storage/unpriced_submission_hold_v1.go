@@ -8,9 +8,8 @@ import (
 	"os"
 )
 
-// This opt-in never resolves the immutable conflict or changes its work cut.
-// The disputed candidate remains held; unrelated rewards retain their own
-// independent work, chain, maturity, and payment checks.
+// This opt-in never changes the immutable conflict or its original work cut.
+// Every reward retains independent work, chain, maturity, and payment checks.
 const unpricedSubmissionHoldEnvV1 = "POOL_UNPRICED_SUBMISSION_HOLD_CONFLICT_ID"
 
 // unpricedSubmissionHoldSQLV1 rechecks the complete evidence in the same SQL
@@ -79,4 +78,28 @@ func (s *PostgresStorage) verifyUnpricedSubmissionHoldV1(ctx context.Context, ch
 // UnpricedSubmissionHoldActive identifies the explicitly qualified hold.
 func (s *PostgresStorage) UnpricedSubmissionHoldActive() bool {
 	return s != nil && s.unpricedSubmissionHold.Load() != nil
+}
+
+func (s *PostgresStorage) rewardCandidateAcceptedV1(ctx context.Context, q queryRower, view CandidateViewV1) (bool, error) {
+	if view.State == SubmissionStateAcceptedFinal {
+		return true, nil
+	}
+	hold := s.unpricedSubmissionHold.Load()
+	if hold == nil || view.State != SubmissionStateConflict {
+		return false, nil
+	}
+	var accepted bool
+	err := q.QueryRow(ctx, `SELECT `+unpricedSubmissionHoldSQLV1(1)+` AND EXISTS(SELECT 1 FROM public.block_submission_conflicts_v1 WHERE conflict_id=$1 AND candidate_id=$2)`, hold[:], view.Candidate.CandidateID[:]).Scan(&accepted)
+	return accepted, err
+}
+
+// The aliases are internal constants supplied by the two reward selectors.
+func (s *PostgresStorage) rewardAcceptedSelectorV1(stateAlias, candidateExpr string, firstParam int) (string, []any) {
+	regular := stateAlias + `.state='accepted_final'`
+	hold := s.unpricedSubmissionHold.Load()
+	if hold == nil {
+		return regular, nil
+	}
+	p := fmt.Sprintf("$%d", firstParam)
+	return `(` + regular + ` OR (` + stateAlias + `.state='conflict' AND EXISTS(SELECT 1 FROM public.block_submission_conflicts_v1 f WHERE f.conflict_id=` + p + ` AND f.candidate_id=` + candidateExpr + `) AND ` + unpricedSubmissionHoldSQLV1(firstParam) + `))`, []any{hold[:]}
 }

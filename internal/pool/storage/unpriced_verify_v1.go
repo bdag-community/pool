@@ -95,19 +95,7 @@ func (s *PostgresStorage) verifyUnpricedWorkTxV1(ctx context.Context, tx pgx.Tx,
 // A payment verifies its own immutable work, while still checking global
 // catalog and conflict invariants. Full audits pass nil to verify every cut.
 func (s *PostgresStorage) verifyUnpricedWorkCandidateTxV1(ctx context.Context, tx pgx.Tx, chainID *big.Int, backendID string, wallet common.Address, candidateID []byte) error {
-	hold := s.unpricedSubmissionHold.Load()
-	allowHeldDuplicate := candidateID != nil && hold != nil
-	if allowHeldDuplicate {
-		// Never use this exception to allocate or pay the disputed candidate.
-		// Other rewards must still pass the complete candidate-specific work,
-		// wallet, native/EVM canonicality, maturity, and payer checks.
-		var disputed bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.block_submission_conflicts_v1 WHERE conflict_id=$1 AND candidate_id=$2)`, hold[:], candidateID).Scan(&disputed); err != nil {
-			return err
-		} else if disputed {
-			return errors.New("disputed unpriced candidate remains held")
-		}
-	}
+	allowHeldDuplicate := s.unpricedSubmissionHold.Load() != nil
 	if err := s.verifyUnpricedStructureWithScopedHoldV1(ctx, tx, allowHeldDuplicate); err != nil {
 		return err
 	}
@@ -118,8 +106,8 @@ func (s *PostgresStorage) verifyUnpricedStructureTxV1(ctx context.Context, tx pg
 	return s.verifyUnpricedStructureWithScopedHoldV1(ctx, tx, false)
 }
 
-// A qualified hold permits startup and verification of unrelated candidates;
-// full audits and the disputed candidate continue to fail closed.
+// Only the exact qualified duplicate is exempted; every work cut is still
+// verified and any other conflict continues to fail closed.
 func (s *PostgresStorage) verifyUnpricedStructureWithScopedHoldV1(ctx context.Context, tx pgx.Tx, allowSubmissionHold bool) error {
 	var err error
 	if _, err = tx.Exec(ctx, `SET LOCAL search_path=pg_catalog,public`); err != nil {

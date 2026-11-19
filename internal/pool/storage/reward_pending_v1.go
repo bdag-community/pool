@@ -33,7 +33,9 @@ func (s *PostgresStorage) NextMatureRewardExcludingV1(ctx context.Context, maxHe
 	for i := range excluded {
 		skipped = append(skipped, excluded[i][:])
 	}
-	err := s.pool.QueryRow(ctx, `SELECT o.candidate_id FROM pool_reward_observations_v1.observations o JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.allocations a USING(candidate_id) WHERE s.state='accepted_final' AND a.candidate_id IS NULL AND o.native_height<=$1::numeric AND o.candidate_id<>ALL($2::bytea[]) ORDER BY o.native_height,o.candidate_id LIMIT 1`, strconv.FormatUint(maxHeight, 10), skipped).Scan(&raw)
+	acceptedSQL, acceptedArgs := s.rewardAcceptedSelectorV1("s", "o.candidate_id", 3)
+	args := append([]any{strconv.FormatUint(maxHeight, 10), skipped}, acceptedArgs...)
+	err := s.pool.QueryRow(ctx, `SELECT o.candidate_id FROM pool_reward_observations_v1.observations o JOIN block_submission_state_v1 s USING(candidate_id) LEFT JOIN pool_reward_observations_v1.allocations a USING(candidate_id) WHERE `+acceptedSQL+` AND a.candidate_id IS NULL AND o.native_height<=$1::numeric AND o.candidate_id<>ALL($2::bytea[]) ORDER BY o.native_height,o.candidate_id LIMIT 1`, args...).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return id, false, nil
 	}

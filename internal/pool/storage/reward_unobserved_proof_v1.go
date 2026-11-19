@@ -44,7 +44,10 @@ func (s *PostgresStorage) provenUnobservedRewardV1(ctx context.Context, id [32]b
 		return false, err
 	}
 	view, err := scanCandidateView(ctx, tx, id)
-	if err != nil || view.State != SubmissionStateAcceptedFinal {
+	if err != nil {
+		return false, errors.New("accepted recovery candidate unavailable")
+	}
+	if accepted, err := s.rewardCandidateAcceptedV1(ctx, tx, view); err != nil || !accepted {
 		return false, errors.New("accepted recovery candidate unavailable")
 	}
 	if err = validateRewardObservationV1(view.Candidate, wallet, obs); err != nil {

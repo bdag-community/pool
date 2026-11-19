@@ -63,7 +63,10 @@ func (s *PostgresStorage) verifyOrAllocateObservedRewardV1(ctx context.Context, 
 		return false, err
 	}
 	view, err := scanCandidateView(ctx, tx, id)
-	if err != nil || view.State != SubmissionStateAcceptedFinal || view.Candidate.Height == nil || !view.Candidate.Height.IsInt64() {
+	if err != nil || view.Candidate.Height == nil || !view.Candidate.Height.IsInt64() {
+		return false, errors.New("accepted reward candidate unavailable")
+	}
+	if accepted, err := s.rewardCandidateAcceptedV1(ctx, tx, view); err != nil || !accepted {
 		return false, errors.New("accepted reward candidate unavailable")
 	}
 	var obs RewardObservationV1

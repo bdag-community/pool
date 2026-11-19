@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -131,8 +133,8 @@ func TestUnpricedSubmissionHoldPreservesAccountingGate(t *testing.T) {
 	if err := s.PrepareRewardStartupV1(ctx, big.NewInt(1404), "node", wallet); err != nil {
 		t.Fatalf("held startup: %v", err)
 	}
-	if err := s.VerifyUnpricedWorkV1(ctx, big.NewInt(1404), "node", wallet); err == nil {
-		t.Fatal("hold opened accounting verification")
+	if err := s.VerifyUnpricedWorkV1(ctx, big.NewInt(1404), "node", wallet); err != nil {
+		t.Fatalf("qualified original work did not verify: %v", err)
 	}
 	other := storageTestCandidate()
 	other.HeaderBytes[181]++
@@ -156,10 +158,41 @@ func TestUnpricedSubmissionHoldPreservesAccountingGate(t *testing.T) {
 	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, verifyTx, big.NewInt(1404), "node", wallet, other.CandidateID[:]); err != nil {
 		t.Fatalf("unrelated candidate should pass its own work verification: %v", err)
 	}
-	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, verifyTx, big.NewInt(1404), "node", wallet, candidate.CandidateID[:]); err == nil {
-		t.Fatal("disputed candidate must remain held")
+	if err := s.verifyUnpricedWorkCandidateTxV1(ctx, verifyTx, big.NewInt(1404), "node", wallet, candidate.CandidateID[:]); err != nil {
+		t.Fatalf("qualified original work did not verify: %v", err)
 	}
 	_ = verifyTx.Rollback(ctx)
+	for _, name := range []string{"20261117_reward_observations_v1.sql", "20261117_reward_credits_v1.sql", "20261118_reward_evm_claims_v1.sql"} {
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(testSourceFile()), "..", "..", "..", "migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, string(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, err := s.NextRewardObservationCandidateV1(ctx)
+	if err != nil || selected == nil || selected.CandidateID != candidate.CandidateID {
+		t.Fatalf("qualified discovery not selected: %v", err)
+	}
+	observation := RewardObservationV1{NativeBlockHash: common.Hash(candidate.ExpectedBlockHash), NativeOrder: 4, NativeHeight: candidate.Height.Uint64(), EVMBlockHash: common.HexToHash("0x11"), EVMBlockNumber: 8, EVMStateRoot: common.HexToHash("0x12"), Wallet: wallet, SubsidyWei: "700", OtherFeesWei: "5", SelfPaidFeesWei: "2"}
+	if _, err := s.RecordRewardObservationV1(ctx, candidate.CandidateID, wallet, observation); err != nil {
+		t.Fatal(err)
+	}
+	if id, found, err := s.NextMatureRewardV1(ctx, candidate.Height.Uint64()); err != nil || !found || id != candidate.CandidateID {
+		t.Fatalf("qualified mature reward not selected: %v", err)
+	}
+	if created, err := s.AllocateObservedRewardV1(ctx, candidate.CandidateID, big.NewInt(1404), "node", wallet, testMatureRewardVerifier{true}); err != nil || !created {
+		t.Fatalf("qualified reward not allocated: %v", err)
+	}
+	var creditID int64
+	var recipient, amount string
+	if err := s.pool.QueryRow(ctx, `SELECT c.id,c.miner_address,c.amount::text FROM public.credits c JOIN pool_reward_observations_v1.credit_bindings b ON b.credit_id=c.id WHERE b.candidate_id=$1`, candidate.CandidateID[:]).Scan(&creditID, &recipient, &amount); err != nil || recipient != share.Miner || amount != "705" {
+		t.Fatalf("qualified reward differs: %s %s %v", recipient, amount, err)
+	}
+	if err := guard.Verify(ctx, creditID, wallet); err != nil {
+		t.Fatalf("qualified payout guard failed: %v", err)
+	}
 	// A new unrelated conflict must immediately close the submission gate.
 	tx, err = s.pool.Begin(ctx)
 	if err != nil {
@@ -173,6 +206,9 @@ func TestUnpricedSubmissionHoldPreservesAccountingGate(t *testing.T) {
 	}
 	if err := s.pool.QueryRow(ctx, `SELECT `+latch, args...).Scan(&latched); err != nil || !latched {
 		t.Fatalf("new conflict did not close gate: latched=%t err=%v", latched, err)
+	}
+	if err := guard.Verify(ctx, creditID, wallet); err == nil {
+		t.Fatal("new conflict did not close payout gate")
 	}
 }
 
